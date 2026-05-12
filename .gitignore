@@ -1,0 +1,16 @@
+logs/
+note/
+outputs/
+checkpoints/
+wandb/
+*.ckpt
+*.pt
+*.pth
+*.parquet
+*.csv
+*.gz
+*.csv.gz
+*.log
+
+__pycache__/
+.ipynb_checkpoints/
