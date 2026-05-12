@@ -92,7 +92,7 @@ def extract_clinical_events(df, model, tokenizer):
         chronology_data.append(f"{row['TIME']} | {row['TEXT']}")
     chronology_text = "\n".join(chronology_data)
 
-    extraction_prompt = f"""DISCHARGE EVENT EXTRACTION TASK\n\nAnalyze the following data from the final 48 hours of the hospital stay and identify key clinical events that are most relevant for summarizing the course of treatment and informing discharge planning.\n\n{chronology_text}
+    extraction_prompt = f"""DISCHARGE EVENT EXTRACTION TASK\n\nAnalyze the following data from the available hospitalization timeline and identify key clinical events that are most relevant for summarizing the course of treatment and informing discharge planning.\n\n{chronology_text}
 
 Only include events that reflect:
 1. Significant changes in symptoms or status (e.g., improvements, worsening, new findings)
@@ -140,9 +140,9 @@ def generate_summary(model, tokenizer, device, chronology_str, extracted_events,
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--inputdir', type=str, default='data/DS/input', help='input directory')
+    parser.add_argument('--inputdir', type=str, default='data/DS/full_input', help='input directory')
     parser.add_argument('--outputdir', type=str, default='data/DS/generated', help='output directory')
-    parser.add_argument('--model', type=str, help='model name, choose from mistral, qwen, deepseek, llama3, llama2')    
+    parser.add_argument('--model', type=str, default='mistral', choices=AVAILABLE_MODELS.keys(), help='model name')
     args = parser.parse_args()
     return args
 
@@ -151,6 +151,9 @@ def main():
     args = parse_args()
     input_folder = args.inputdir
     model_selection = args.model
+
+    if not os.path.isdir(input_folder):
+        raise FileNotFoundError(f"Input directory not found: {input_folder}")
 
     output_folder = os.path.join(args.outputdir, f'EE/{model_selection}_v2')
     os.makedirs(output_folder, exist_ok=True) 
@@ -184,7 +187,7 @@ def main():
             hospital_course = generate_summary(
                 model, tokenizer, device,
                 chronology_str, extracted_events,
-                "Summarize the patient's hospital course over the past 48 hours, detailing key treatments administered, the patient's response, any significant events, and progress toward recovery."
+                "Summarize the patient's hospital course across the available hospitalization timeline, detailing key treatments administered, the patient's response, any significant events, and progress toward recovery."
             )
 
             discharge_instructions = generate_summary(

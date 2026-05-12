@@ -154,8 +154,8 @@ def parse_args():
     parser.add_argument('--inputdir', type=str, default='data/AP/input', help='input directory')
     parser.add_argument('--outputdir', type=str, default='data/AP/generated', help='output directory')
     parser.add_argument('--method', type=int, default=-1, help='PN generation method')
-    parser.add_argument('--setting', type=str, default='gt', help='Experimental setting, gt or gen')
-    parser.add_argument('--model', type=str, help='model name, choose from mistral, qwen, deepseek, llama3, llama2')    
+    parser.add_argument('--setting', type=str, default='gt', choices=['gt', 'gen'], help='Experimental setting')
+    parser.add_argument('--model', type=str, default='mistral', choices=AVAILABLE_MODELS.keys(), help='model name')
     args = parser.parse_args()
     return args
 
@@ -165,6 +165,9 @@ def main():
     input_folder = args.inputdir
     setting = args.setting
     model_selection = args.model
+
+    if not os.path.isdir(input_folder):
+        raise FileNotFoundError(f"Input directory not found: {input_folder}")
 
     # V2: output to gt_v2 or gen_v2 folder
     base_output_folder = os.path.join(args.outputdir, f'EE/{model_selection}/{setting}_v2')
@@ -201,11 +204,20 @@ def main():
         os.makedirs(method_output_folder, exist_ok=True)
 
         for filename in tqdm(os.listdir(input_folder), desc=f"Files (method={method})"):
+            if not filename.endswith('.csv'):
+                continue
+
             file_path = os.path.join(input_folder, filename)
             try:
                 df = pd.read_csv(file_path)
             except Exception as e:
                 print(f"Error reading {file_path}: {str(e)}")
+                continue
+
+            required_columns = {"DAY", "TIME", "REL_TIME", "TEXT", "IS_NOTE"}
+            missing_columns = required_columns.difference(df.columns)
+            if missing_columns:
+                print(f"Skipping {filename}: missing columns {sorted(missing_columns)}")
                 continue
 
             df = df.dropna(subset=["TEXT"])
