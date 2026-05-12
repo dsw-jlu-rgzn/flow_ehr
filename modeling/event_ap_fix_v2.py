@@ -156,6 +156,7 @@ def parse_args():
     parser.add_argument('--method', type=int, default=-1, help='PN generation method')
     parser.add_argument('--setting', type=str, default='gt', choices=['gt', 'gen'], help='Experimental setting')
     parser.add_argument('--model', type=str, default='mistral', choices=AVAILABLE_MODELS.keys(), help='model name')
+    parser.add_argument('--run_name', type=str, default='', help='Optional output folder name under EE/<model>')
     args = parser.parse_args()
     return args
 
@@ -169,8 +170,9 @@ def main():
     if not os.path.isdir(input_folder):
         raise FileNotFoundError(f"Input directory not found: {input_folder}")
 
-    # V2: output to gt_v2 or gen_v2 folder
-    base_output_folder = os.path.join(args.outputdir, f'EE/{model_selection}/{setting}_v2')
+    # V2: output to gt_v2/gen_v2 by default, or to a named comparison folder.
+    run_folder = args.run_name if args.run_name else f'{setting}_v2'
+    base_output_folder = os.path.join(args.outputdir, f'EE/{model_selection}/{run_folder}')
     os.makedirs(base_output_folder, exist_ok=True) 
 
     methods_to_run = [-1, 1, 2] 

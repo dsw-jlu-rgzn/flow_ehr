@@ -367,3 +367,58 @@ quickumls = QuickUMLS("/path/to/QuickUMLS/", ...)
 ## 🙏 Acknowledgement
 
 This work is supported by National Library of Medicine R00 LM014308.
+## Minimal supervised prefilter MVP
+
+For a smaller closed-loop test, `modeling/flow_prefilter_mvp.py` trains a small
+model before the LLM. It uses each day's ground-truth AP note as the target
+embedding, predicts that note direction from same-day EHR rows, ranks raw rows
+plus deterministic trend snippets, then exports a condensed AP input directory.
+
+```bash
+# Train the small flow model and export data/AP/input_flow_topk
+bash run_flow_prefilter_mvp.sh 40 flow
+
+# Run the existing AP LLM pipeline on the condensed input
+python -u modeling/event_ap_fix_v2.py \
+  --inputdir data/AP/input_flow_topk \
+  --outputdir data/AP/generated \
+  --setting gt \
+  --model mistral
+```
+
+Use `bash run_flow_prefilter_mvp.sh 40 mlp` as a one-step baseline. The MVP uses
+a dependency-light hashing text encoder so the first test does not require
+downloading Sentence-BERT; if this improves retrieval/generation, replace that
+encoder with a clinical sentence encoder next.
+
+## No-training embedding prefilter
+
+For the simplest closed loop, `modeling/embedding_prefilter_no_train.py` uses
+the existing LLM as a frozen embedding encoder. It does not train any small
+model; it only ranks same-day EHR rows plus trend snippets by embedding
+similarity.
+
+```bash
+# Realistic mode: use previous note as the retrieval target
+bash run_embedding_prefilter_no_train.sh 40 previous_note mistral
+
+# Upper-bound/debug mode: use same-day ground-truth note as the retrieval target
+bash run_embedding_prefilter_no_train.sh 40 oracle_gt mistral
+
+# Then run the existing AP generator
+python -u modeling/event_ap_fix_v2.py \
+  --inputdir data/AP/input_embedding_topk_previous_note \
+  --outputdir data/AP/generated \
+  --setting gt \
+  --model mistral \
+  --run_name embedding_previous_note
+```
+
+Compare the baseline and prefiltered generations on the same admission IDs:
+
+```bash
+bash run_compare_ap_generation.sh \
+  data/AP/generated/EE/mistral/gt_v2 \
+  data/AP/generated/EE/mistral/embedding_previous_note \
+  embedding_previous_note
+```
