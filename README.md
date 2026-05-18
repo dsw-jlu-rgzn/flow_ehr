@@ -1,424 +1,290 @@
-# Clinical Summarization — Longitudinal EHR Generation
+# Flow-EHR: Longitudinal Clinical Text Generation and Evidence-Grounded Revision
 
-This repository contains code for the paper **"Large Language Models with Temporal Reasoning for Longitudinal Clinical Summarization and Prediction"** (EMNLP 2025 Findings).
+This repository contains code for longitudinal EHR text generation experiments on
+MIMIC-style clinical data. It extends the original A&P / discharge-summary
+generation pipeline with evidence filtering, no-training embedding baselines,
+ProblemFlow multi-agent generation, and the current **ProblemFlow V6** framework:
 
-**Link**: https://aclanthology.org/2025.findings-emnlp.1128/
+> high-coverage direct draft + certainty gate + coverage guard + verifier +
+> minimal evidence-constrained revision.
 
----
+The project is designed for reproducible experiments on:
 
-## 📋 Table of Contents
+- **A&P generation**: daily Assessment & Plan generation from structured EHR events and note context.
+- **Discharge Summary generation**: diagnosis, hospital course, and discharge instruction generation.
+- **Evidence-grounded evaluation**: ROUGE-L, SapBERT, CUI-F1 when UMLS is available, lightweight clinical semantic metrics, and LLM-as-a-judge protocols.
 
-- [Task Overview](#task-overview)
-- [Project Structure](#project-structure)
-- [Data Preparation](#data-preparation)
-- [Pipeline: Step by Step](#pipeline-step-by-step)
-  - [1. Target Population Extraction](#1-target-population-extraction)
-  - [2. Chronology Construction](#2-chronology-construction)
-  - [3. Model Generation](#3-model-generation)
-  - [4. Evaluation](#4-evaluation)
-- [Running with nohup (Important!)](#running-with-nohup-important)
-- [Troubleshooting](#troubleshooting)
-- [Flow Matching + Embedding Experiment](#flow-matching--embedding-experiment)
-- [Citation](#citation)
+No MIMIC or UMLS data is committed to this repository.
 
----
+## Repository Layout
 
-## 🎯 Task Overview
-
-Three NLP generation/prediction tasks on MIMIC-IV clinical data:
-
-| Task | Input | Output | Script |
-|------|-------|--------|--------|
-| **Assessment & Plan (A&P)** | Multi-day structured EHR + previous notes | Daily A&P sections of progress notes | `event_ap_fix.py` |
-| **Discharge Summary (DS)** | Last 48h structured EHR | Diagnosis + Hospital Course + Discharge Instructions | `event_ds_fix.py` |
-| **EHRShot Diagnosis** | Patient data + diagnosis query | Binary prediction | `evaluation/evaluate_ehrshot.py` |
-
-Available models: `mistral`, `qwen`, `deepseek`, `llama3`, `llama2`
-
----
-
-## 📁 Project Structure
-
+```text
+analysis/                         Research notes and experiment reports
+evaluation/                       AP/DS evaluators and clinical semantic metrics
+experiments/problemflow_ap/       ProblemFlow AP experiments, including V5/V6
+modeling/                         Generation, prefiltering, and DeepSeek scripts
+processing/                       MIMIC preprocessing and task construction
+scripts/                          Utility scripts, including QuickUMLS indexing
+run_*.ps1 / run_*.sh              Convenience runners
 ```
-longitudinal_clinical_summarization/
-├── modeling/                        # Generation scripts
-│   ├── event_ap_fix.py              # ✅ A&P generation (fixed)
-│   ├── event_ds_fix.py              # ✅ Discharge summary (fixed)
-│   ├── event_ap.py / event_ds.py    # Original scripts (broken - login hangs, missing args)
-│   ├── ds_gen.py / ap_gen.py        # Direct generation (original paper)
-│   ├── RAG_script_ds.py / RAG_script_ap.py  # RAG version
-│   ├── flow_match_clinical_framework.py     # Flow Matching experiment (v1)
-│   └── flow_match_clinical_v2.py            # Flow Matching experiment (v2, with text embedding)
-├── processing/                      # Data preprocessing
-│   ├── get_target_population.py     # Filter MIMIC-IV patients
-│   ├── get_chronologies_AP.py       # Build A&P chronologies
-│   ├── get_chronologies_AP_fix.py   # Fixed version
-│   ├── get_chronologies_DS.py       # Build DS chronologies
-│   ├── get_chronologies_DS_fix.py   # Fixed version
-│   └── get_chronologies_DS_full_fix.py
-├── evaluation/                      # Metrics
-│   ├── evaluate_ap.py               # ROUGE-L / SapBERT / CUI-F1 for A&P
-│   └── evaluate_ds.py               # Same metrics for DS (section-level)
-├── setup.sh                         # Full pipeline setup
-├── run.sh                           # Original generation runner
-└── evaluate.sh                      # Original evaluation runner
 
+Large or licensed local artifacts are intentionally ignored:
+
+```text
 data/
-├── AP/                              # Assessment & Plan task
-│   ├── input/                       # input_{admission_id}.csv
-│   └── gold/                        # gt_{admission_id}.csv
-├── DS/                              # Discharge Summary task
-│   ├── input/                       # 24_both_{admission_id}.csv
-│   └── gold/                        # gtsummary_{admission_id}.txt
-└── MIMIC-IV/target/                 # Filtered MIMIC-IV tables
+data_backup*/
+.venv*/
+evaluation/*outputs*/
+experiments/**/outputs*/
 ```
 
----
+## Main Contributions in This Working Version
 
-## 🔧 Data Preparation
+### 1. MIMIC task preparation
 
-### Prerequisites
-
-1. Request MIMIC-IV access from [PhysioNet](https://physionet.org/content/mimiciv/3.1/)
-2. Download and place `mimic-iv-3.1.zip` and `note.tar.gz` in the project root
-3. Install UMLS for CUI evaluation (see [UMLS Setup](#umls-setup) below)
-
-### Step 1: Filter target population
+The repository includes scripts to regenerate AP/DS tasks from raw MIMIC data:
 
 ```bash
-conda run -n safevla python processing/get_target_population_fix.py
+python processing/prepare_mimic3_tasks.py --help
+python processing/validate_mimic3_tasks.py --data-root data
 ```
 
-This extracts a subset of patients from MIMIC-IV with sufficient data (output in `data/MIMIC-IV/target/`).
+For the current local setup, AP and DS task files are expected under:
 
-### Step 2: Build patient chronologies
+```text
+data/AP/input/
+data/AP/gold/
+data/DS/input/
+data/DS/full_input/
+data/DS/gold/
+```
+
+### 2. DeepSeek generation support
+
+DeepSeek API generation scripts are provided for AP/DS and ProblemFlow
+experiments. Set the key through an environment variable rather than editing it
+into files:
+
+```powershell
+$env:DEEPSEEK_API_KEY = "..."
+```
+
+### 3. ProblemFlow AP experiments
+
+ProblemFlow AP is implemented in:
+
+```text
+experiments/problemflow_ap/problemflow_ap.py
+```
+
+Supported methods include:
+
+```text
+direct
+trend
+problemflow
+problemflow_v2
+problemflow_v3
+problemflow_v4
+problemflow_v5
+problemflow_v6
+```
+
+Run a small smoke test:
+
+```powershell
+& "C:\Users\dsw54\AppData\Local\Programs\Python\Python312\python.exe" `
+  experiments\problemflow_ap\problemflow_ap.py run-all `
+  --inputdir data\AP\input `
+  --golddir data\AP\gold `
+  --outdir experiments\problemflow_ap\outputs_deepseek_v6_smoke `
+  --method problemflow_v6 `
+  --llm deepseek `
+  --limit 5
+```
+
+Run full AP V6:
+
+```powershell
+& "C:\Users\dsw54\AppData\Local\Programs\Python\Python312\python.exe" `
+  experiments\problemflow_ap\problemflow_ap.py run-all `
+  --inputdir data\AP\input `
+  --golddir data\AP\gold `
+  --outdir experiments\problemflow_ap\outputs_deepseek_v6_full `
+  --method problemflow_v6 `
+  --llm deepseek
+```
+
+## ProblemFlow V6
+
+V6 is the current best-balanced AP generation design in this repo.
+
+### Motivation
+
+Direct LLM generation usually gives better lexical overlap and broader clinical
+coverage, but it can introduce unsupported clinical claims. Evidence-first
+ProblemFlow variants improve grounding but may become too conservative and lose
+ROUGE-L. V6 targets this trade-off.
+
+### Pipeline
+
+```text
+Input context + EHR evidence
+-> Evidence Agent
+-> Problem Detector
+-> Certainty Gate
+-> Coverage Guard
+-> Direct LLM Writer
+-> Draft A&P
+-> Verifier
+-> Unsupported claim list
+-> Minimal Reviser
+-> Final A&P
+```
+
+Key idea:
+
+```text
+Preserve the high-coverage direct draft whenever it is supported, and only make
+local edits to unsupported, over-specific, or weakly grounded claims.
+```
+
+More details are documented in:
+
+```text
+analysis/problemflow_v6_technical_report_zh.md
+```
+
+## Evaluation
+
+### Official-style AP evaluation
 
 ```bash
-# Discharge Summary chronologies (last 48 hours)
-conda run -n safevla python processing/get_chronologies_DS_fix.py
-
-# Assessment & Plan chronologies (multi-day structured data)
-conda run -n safevla python processing/get_chronologies_AP_fix.py
-```
-
-**Input data format:**
-
-For A&P (`data/AP/input/input_23056393.csv`):
-```
-DAY | REL_TIME | TIME | TEXT | IS_NOTE
-1   | Day 1 08:00 | ... | HR: 88 bpm | 0
-1   | Day 1 09:00 | ... | WBC: 12.5 | 0
-1   | Day 1 10:00 | ... | Assessment: ... | 1   ← IS_NOTE=1 = doctor's progress note
-2   | Day 2 08:00 | ... | HR: 92 bpm | 0
-```
-
-For DS (`data/DS/input/24_both_24274249.csv`):
-```
-REL_TIME | TIME | TEXT
-3 hours  | ...  | 12.5 mg Metoprolol administered.
-2 hours  | ...  | Hemoglobin 7.80 g/dL.
-```
-
----
-
-## 🤖 Model Generation
-
-### Option A: Event-based generation (**Recommended**, our fixed version)
-
-These scripts implement a **two-stage pipeline**:
-1. **Event Extraction (EE)** — LLM extracts key clinical events from raw EHR
-2. **Generation (Gen)** — LLM generates the final clinical text using extracted events
-
-#### A&P Generation (Assessment & Plan)
-
-```bash
-# Method -1: no history, Method 1: previous note only, Method 2: all history
-# Setting gt: uses real doctor notes as context, gen: uses model-generated notes
-
-nohup HF_TOKEN=hf_xxxxxxxxxx CUDA_VISIBLE_DEVICES=7 \
-  conda run -n safevla python modeling/event_ap_fix.py \
-  --inputdir data/AP/input \
-  --outputdir data/AP/generated \
-  --setting gt --model mistral \
-  > logs/event_ap.log 2>&1 &
-```
-
-- Output: `data/AP/generated/EE/mistral/gt/method-1|method1|method2/genpns_{id}.csv`
-
-#### Discharge Summary Generation
-
-```bash
-nohup HF_TOKEN=hf_xxxxxxxxxx CUDA_VISIBLE_DEVICES=7 \
-  conda run -n safevla python modeling/event_ds_fix.py \
-  --inputdir data/DS/input \
-  --outputdir data/DS/generated \
-  --model mistral \
-  > logs/event_ds.log 2>&1 &
-```
-
-- Output: `data/DS/generated/EE/mistral/gtsummary_{id}.txt`
-
-### Option B: Direct generation (Original paper)
-
-These run the original paper scripts (`ds_gen.py`, `ap_gen.py`):
-
-```bash
-# DS
-CUDA_VISIBLE_DEVICES=0,1 conda run -n safevla python modeling/ds_gen.py --outputdir results/directgen_discharge_sum
-
-# AP (runs all 3 methods)
-CUDA_VISIBLE_DEVICES=0,1 conda run -n safevla python modeling/ap_gen.py --method -1 --outputdir results/directgen_assessment_plan/method-1
-CUDA_VISIBLE_DEVICES=0,1 conda run -n safevla python modeling/ap_gen.py --method 1  --outputdir results/directgen_assessment_plan/method1
-CUDA_VISIBLE_DEVICES=0,1 conda run -n safevla python modeling/ap_gen.py --method 2  --outputdir results/directgen_assessment_plan/method2
-```
-
-Or use the provided runner:
-```bash
-bash run.sh ds
-bash run.sh ap
-```
-
-### Option C: RAG generation
-
-```bash
-bash run.sh rag_ds
-bash run.sh rag_ap
-```
-
----
-
-## 📊 Evaluation
-
-### Evaluate A&P generation
-
-```bash
-conda run -n safevla python evaluation/evaluate_ap.py \
-  --gen_dir data/AP/generated/EE/mistral/gt \
+python evaluation/evaluate_ap.py \
+  --gen_dir data/AP/generated/DG/deepseek_api_full/gt \
   --gt_dir data/AP/gold
 ```
 
-Evaluates all 3 methods (method-1, method1, method2) with:
-- **ROUGE-L F1** — lexical overlap
-- **SapBERT F1** — semantic similarity via PubMedBERT embeddings
-- **CUI-F1** — clinical concept overlap (requires UMLS)
+Metrics:
 
-### Evaluate DS generation
+- ROUGE-L
+- SapBERT F1
+- CUI-F1, if QuickUMLS/UMLS is configured
+
+### Official-style DS evaluation
 
 ```bash
-conda run -n safevla python evaluation/evaluate_ds.py \
-  --gen_dir data/DS/generated/EE/mistral \
+python evaluation/evaluate_ds.py \
+  --gen_dir data/DS/generated/DG/deepseek_api_full \
   --gt_dir data/DS/gold
 ```
 
-Evaluates 3 sections separately (Diagnosis / Hospital Course / Discharge Instructions).
+### Lightweight clinical semantic evaluation
 
----
-
-## 📌 Running with nohup (Important!)
-
-**Scripts take 30–60 minutes to finish** on Mistral-7B (6 patients × ~20 days × 2 passes each).
-
-Do NOT run directly — use `nohup` to avoid timeout:
+This evaluator does not require UMLS, QuickUMLS, SapBERT, or a downloaded model:
 
 ```bash
-# Recommended: create a logs directory first
-mkdir -p logs
-
-# Start AP generation
-nohup HF_TOKEN= CUDA_VISIBLE_DEVICES=7 \
-  conda run -n safevla python modeling/event_ap_fix.py \
-  --inputdir data/AP/input --outputdir data/AP/generated --setting gt --model mistral \
-  > logs/event_ap_fix.log 2>&1 &
-
-# Start DS generation
-nohup HF_TOKEN= CUDA_VISIBLE_DEVICES=7 \
-  conda run -n safevla python modeling/event_ds_fix.py \
-  --inputdir data/DS/input --outputdir data/DS/generated --model mistral \
-  > logs/event_ds_fix.log 2>&1 &
-
-# Check progress
-tail -f logs/event_ap_fix.log
-
-# Check GPU usage
-watch -n 2 nvidia-smi
-
-# Check if process is still running
-ps aux | grep event_ap_fix
+python evaluation/evaluate_clinical_semantics.py \
+  --samples experiments/problemflow_ap/outputs_deepseek_v6_full/data/ap_samples.jsonl \
+  --run direct=experiments/problemflow_ap/outputs_deepseek_direct_full/generations/direct.jsonl \
+  --run problemflow_v5=experiments/problemflow_ap/outputs_deepseek_v5_full/generations/problemflow_v5.jsonl \
+  --run problemflow_v6=experiments/problemflow_ap/outputs_deepseek_v6_full/generations/problemflow_v6.jsonl \
+  --outdir evaluation/clinical_semantics_outputs/direct_vs_v5_vs_v6
 ```
 
----
+It reports:
 
-## ⚠️ Known Issues & Fixes
+- ROUGE-L
+- Clinical Concept F1
+- Problem F1
+- Treatment F1
+- Grounded Concept Rate
+- Unsupported Concept Rate
+- Numeric Claim Support Rate
+- Trend F1
+- Evidence Trend Accuracy
 
-> We encountered several issues with the original codebase and created `_fix.py` versions.
+Current local AP comparison on 57 samples:
 
-| Issue | Original Code | Fix |
-|-------|--------------|-----|
-| 🟡 **login() hangs** | `login()` blocks forever on servers without interactive terminal | `try_login()` uses `HF_TOKEN` env var instead |
-| 🟡 **Missing HF mirror** | Directly downloads from `huggingface.co` (blocked in some regions) | Auto-sets `HF_ENDPOINT=https://hf-mirror.com` |
-| 🟡 **Missing `--outputdir`** | `event_ap.py` uses `args.outputdir` but never defines it | Added `--outputdir` argument with default |
-| 🟡 **Model loaded per method** | LLM re-loaded inside the file loop (~30s × N files wasted) | Model loaded once at the start |
-| 🟡 **No GPU memory cleanup** | OOM after processing several patients | `del + torch.cuda.empty_cache() + gc.collect()` after each inference |
-| 🟡 **BitsAndBytes version** | Old `bitsandbytes` fails with `'NoneType' object has no attribute 'quant_type'` | Upgraded to `bitsandbytes>=0.49.2` |
-| 🟢 **DS output naming** | Output filename doesn't match gold naming convention | Changed to `gtsummary_{id}.txt` |
+| Method | N | ROUGE-L | Concept F1 | Problem F1 | Treatment F1 | Grounded | Unsupported | Numeric Support | Trend F1 | Evidence Trend Acc |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| direct | 57 | 7.66 | 80.70 | 83.52 | 75.23 | 96.92 | 3.08 | 75.00 | 6.84 | 61.70 |
+| problemflow_v5 | 57 | 6.06 | 75.69 | 76.06 | 74.78 | 98.05 | 1.95 | 84.89 | 30.70 | 69.91 |
+| problemflow_v6 | 57 | 7.34 | 78.66 | 81.08 | 74.06 | 98.10 | 1.90 | 76.20 | 7.26 | 59.39 |
 
-### How the fixed versions differ
+Interpretation: V6 recovers much of direct generation's ROUGE-L and coverage
+while keeping unsupported concepts lower than direct generation.
 
-| Feature | `event_ap.py` (original) | `event_ap_fix.py` (fixed) |
-|---------|------------------------|---------------------------|
-| `--outputdir` arg | ❌ Missing | ✅ Added (default: `data/AP/generated`) |
-| Login | `login()` hangs | `try_login()` with HF_TOKEN |
-| Model loading | Inside loop (N times) | Once at startup |
-| HF mirror | None | Auto `hf-mirror.com` |
-| GPU memory | Never cleaned | Cleaned after each call |
-| DS output name | `24_both_{id}.txt` | `gtsummary_{id}.txt` |
+## QuickUMLS / UMLS Setup
 
----
+QuickUMLS itself can be installed in Linux/WSL, but UMLS Metathesaurus data must
+be downloaded separately from NLM under a UMLS license.
 
-## 🔬 Flow Matching + Embedding Experiment
+The expected UMLS files are:
 
-This is an experimental framework for **unsupervised EHR compression using Flow Matching**.
-
-### Idea
-
-Instead of feeding raw EHR text directly into the LLM, use a small Flow Matching model to:
-1. Encode daily EHR events into **semantic embeddings** (via Sentence-BERT)
-2. Compress the sequence into a **patient course vector** (via Flow Matching)
-3. Convert to **soft prompts** injected into the LLM's embedding space
-
-### Architecture
-
-```
-EHR text → Sentence-BERT (384d) → FlowMatchingEncoder (128d) 
-  → Projector (16 tokens × 4096d) → LLM generates clinical text
+```text
+MRCONSO.RRF
+MRSTY.RRF
 ```
 
-### Training stages
-
-| Stage | What | Loss | Data needed |
-|-------|------|------|-------------|
-| **1** | Flow Matching pre-training | MSE (predict velocity field) | EHR text only (no labels) |
-| **2** | Projector training | CE Loss (text generation) | (EHR, doctor note) pairs |
-| **3** (optional) | Full fine-tune with LoRA | CE Loss | Same as Stage 2 |
-
-### Files
-
-- `modeling/flow_match_clinical_v2.py` — Complete implementation
-- Uses `sentence-transformers/all-MiniLM-L6-v2` for text embedding (frozen, 80M params)
-- Flow Encoder: ~15M trainable params, Projector: ~5M trainable params
-- LLM (Mistral-7B): frozen, loaded with 4-bit quantization
-
-### Run
+After placing the UMLS `META` directory locally, build the QuickUMLS index:
 
 ```bash
-# Stage 1: Unsupervised Flow Matching (no labels needed)
-conda run -n safevla python modeling/flow_match_clinical_v2.py --stage 1 --epochs 100
-
-# Demo with random initialization
-conda run -n safevla python modeling/flow_match_clinical_v2.py --stage 0
+cd /mnt/c/Users/dsw54/Desktop/codex_related/flow_ehr
+. .venv-eval/bin/activate
+scripts/build_quickumls_index.sh data/umls/2024AB/META data/quickumls/2024AB
 ```
 
----
-
-## 📝 Evaluation Metrics Explained
-
-### ROUGE-L F1
-Measures **n-gram overlap** between generated and ground-truth text. Higher = more lexically similar.
-
-### SapBERT-F1 (Semantic F1)
-Uses **SapBERT** (PubMedBERT fine-tuned with contrastive learning) to compute token-level semantic similarity. Captures **paraphrased but clinically equivalent** content.
-
-### CUI-F1
-Extracts **Concept Unique Identifiers** (from UMLS Metathesaurus) from both texts and computes exact concept overlap. Requires a working UMLS/QuickUMLS installation.
-
----
-
-## 🔧 UMLS Setup
-
-Required for CUI-F1 evaluation:
+Then evaluate with CUI-F1 enabled:
 
 ```bash
-# 1. Download UMLS from: https://www.nlm.nih.gov/research/umls/
-# 2. Install QuickUMLS
-pip install quickumls
-
-# 3. Point QuickUMLS to your UMLS installation in the evaluation scripts
-quickumls = QuickUMLS("/path/to/QuickUMLS/", ...)
+export QUICKUMLS_PATH="$PWD/data/quickumls/2024AB"
+python evaluation/evaluate_ap.py --gen_dir ... --gt_dir ...
+python evaluation/evaluate_ds.py --gen_dir ... --gt_dir ...
 ```
 
----
+## Research Directions
 
-## 📚 Citation
+The main research directions explored in this repository include:
+
+- Flow matching / no-training embedding prefilters for AP evidence selection.
+- ProblemFlow multi-agent AP generation.
+- Draft-preserving evidence-constrained revision.
+- LLM-as-a-judge evaluation for clinical usefulness and faithfulness.
+- Admission-local style memory for future ROUGE-L improvement.
+
+Relevant notes:
+
+```text
+analysis/research_directions_beyond_flow_matching_zh.md
+analysis/problemflow_v6_technical_report_zh.md
+analysis/ap_ds_data_and_experiment_report_zh.md
+```
+
+## Security and Data Policy
+
+Do not commit:
+
+- MIMIC data
+- UMLS data
+- generated full outputs with sensitive content
+- API keys
+- local virtual environments
+
+Use environment variables for API keys:
+
+```powershell
+$env:DEEPSEEK_API_KEY = "..."
+```
+
+## Citation
+
+This project builds on the paper:
 
 ```bibtex
-@misc{kruse2025largelanguagemodelstemporal,
-  title={Large Language Models with Temporal Reasoning for Longitudinal Clinical Summarization and Prediction}, 
-  author={Maya Kruse and Shiyue Hu and Nicholas Derby and Yifu Wu and Samantha Stonbraker and Bingsheng Yao and Dakuo Wang and Elizabeth Goldberg and Yanjun Gao},
-  year={2025},
-  eprint={2501.18724},
-  archivePrefix={arXiv},
-  primaryClass={cs.CL},
-  url={https://arxiv.org/abs/2501.18724}, 
+@inproceedings{longitudinal-ehr-generation-2025,
+  title = {Large Language Models with Temporal Reasoning for Longitudinal Clinical Summarization and Prediction},
+  booktitle = {Findings of EMNLP},
+  year = {2025}
 }
-```
-
----
-
-## 🙏 Acknowledgement
-
-This work is supported by National Library of Medicine R00 LM014308.
-## Minimal supervised prefilter MVP
-
-For a smaller closed-loop test, `modeling/flow_prefilter_mvp.py` trains a small
-model before the LLM. It uses each day's ground-truth AP note as the target
-embedding, predicts that note direction from same-day EHR rows, ranks raw rows
-plus deterministic trend snippets, then exports a condensed AP input directory.
-
-```bash
-# Train the small flow model and export data/AP/input_flow_topk
-bash run_flow_prefilter_mvp.sh 40 flow
-
-# Run the existing AP LLM pipeline on the condensed input
-python -u modeling/event_ap_fix_v2.py \
-  --inputdir data/AP/input_flow_topk \
-  --outputdir data/AP/generated \
-  --setting gt \
-  --model mistral
-```
-
-Use `bash run_flow_prefilter_mvp.sh 40 mlp` as a one-step baseline. The MVP uses
-a dependency-light hashing text encoder so the first test does not require
-downloading Sentence-BERT; if this improves retrieval/generation, replace that
-encoder with a clinical sentence encoder next.
-
-## No-training embedding prefilter
-
-For the simplest closed loop, `modeling/embedding_prefilter_no_train.py` uses
-the existing LLM as a frozen embedding encoder. It does not train any small
-model; it only ranks same-day EHR rows plus trend snippets by embedding
-similarity.
-
-```bash
-# Realistic mode: use previous note as the retrieval target
-bash run_embedding_prefilter_no_train.sh 40 previous_note mistral
-
-# Upper-bound/debug mode: use same-day ground-truth note as the retrieval target
-bash run_embedding_prefilter_no_train.sh 40 oracle_gt mistral
-
-# Then run the existing AP generator
-python -u modeling/event_ap_fix_v2.py \
-  --inputdir data/AP/input_embedding_topk_previous_note \
-  --outputdir data/AP/generated \
-  --setting gt \
-  --model mistral \
-  --run_name embedding_previous_note
-```
-
-Compare the baseline and prefiltered generations on the same admission IDs:
-
-```bash
-bash run_compare_ap_generation.sh \
-  data/AP/generated/EE/mistral/gt_v2 \
-  data/AP/generated/EE/mistral/embedding_previous_note \
-  embedding_previous_note
 ```
