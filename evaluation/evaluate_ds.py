@@ -4,7 +4,6 @@ import numpy as np
 import torch
 from rouge import Rouge
 from transformers import AutoTokenizer, AutoModel
-from quickumls import QuickUMLS
 import sys
 import argparse
 
@@ -14,13 +13,26 @@ sys.setrecursionlimit(10000)
 
 rouge = Rouge(metrics=["rouge-l"])
 
-# update with your own UMLS installation path
-quickumls = QuickUMLS(
-    "/path/to/QuickUMLS/",
-    threshold=0.9,
-    overlapping_criteria="score",
-    similarity_name="cosine",
-)
+try:
+    from quickumls import QuickUMLS
+except ImportError:
+    QuickUMLS = None
+
+quickumls = None
+if QuickUMLS is not None:
+    quickumls_path = os.environ.get("QUICKUMLS_PATH")
+    if quickumls_path:
+        try:
+            quickumls = QuickUMLS(
+                quickumls_path,
+                threshold=0.9,
+                overlapping_criteria="score",
+                similarity_name="cosine",
+            )
+        except Exception as exc:
+            print(f"QuickUMLS unavailable; CUI-F1 will be skipped. Reason: {exc}")
+    else:
+        print("QuickUMLS path not set; CUI-F1 will be skipped. Set QUICKUMLS_PATH to enable it.")
 
 
 tokenizer = AutoTokenizer.from_pretrained("cambridgeltl/SapBERT-from-PubMedBERT-fulltext")
@@ -34,7 +46,7 @@ SEMANTIC_TYPES = {
 
 
 def read_file(file_path):
-    with open(file_path, "r") as file:
+    with open(file_path, "r", encoding="utf-8", errors="replace") as file:
         return file.read()
 
 # Find the three sections in discharge summaries and ground truth files
@@ -44,16 +56,17 @@ def extract_sections(text, is_ground_truth=False):
     if is_ground_truth:
         diagnosis_start = re.search(r"(Discharge Diagnosis:|DISCHARGED DIAGNOSES:|FINAL DIAGNOSIS:|DISCHARGE DIAGNOSIS:)", text)
         hospital_course_start = re.search(r"(Brief Hospital Course:|HOSPITAL COURSE:)", text)
-        discharge_instructions_start = re.search(r"(Discharge Instructions:|DISCHARGE PLAN:|DISCHARGE INSTRUCTIONS/FOLLOWUP:|RECOMMENDED FOLLOWUP:|FOLLOWUP: )", text)
+        discharge_instructions_start = re.search(r"(Discharge Instructions:|DISCHARGE PLAN:|DISCHARGE INSTRUCTIONS/FOLLOWUP:|RECOMMENDED FOLLOWUP:|FOLLOWUP: |DISCHARGE MEDICATIONS:|DIET:)", text)
         
-        diagnosis_end = re.search(r"Discharge Condition:|RECOMMENDED FOLLOWUP:|DISCHARGE INSTRUCTIONS/FOLLOWUP:|DISCHARGE MEDICATIONS:|MEDICATIONS ON DISCHARGE:", text)
-        hospital_course_end = re.search(r"(Discharge Medications:|DISCHARGE STATUS:|Medications on Admission:|CONDITION ON DISCHARGE:|DISCHARGE DIAGNOSES:|DISCHARGE CONDITION:)", text)
+        diagnosis_end = re.search(r"Discharge Condition:|RECOMMENDED FOLLOWUP:|DISCHARGE INSTRUCTIONS/FOLLOWUP:|DISCHARGE MEDICATIONS:|MEDICATIONS ON DISCHARGE:", text[diagnosis_start.end():] if diagnosis_start else "")
+        hospital_course_end = re.search(r"(Discharge Medications:|DISCHARGE MEDICATIONS:|DISCHARGE STATUS:|Medications on Admission:|CONDITION ON DISCHARGE:|DISCHARGE DIAGNOSES:|DISCHARGE DIAGNOSIS:|DISCHARGE CONDITION:)", text)
         discharge_instructions_end = re.search(r"Followup Instructions:|RECOMMENDED FOLLOW-UP", text)
         if not discharge_instructions_end:
             discharge_instructions_end = re.search(r"\[\*\*First Name|\[\*\*Name", text)
 
-        if diagnosis_start and diagnosis_end:
-            sections["Diagnosis"] = text[diagnosis_start.end():diagnosis_end.start()].strip()
+        if diagnosis_start:
+            diagnosis_end_pos = diagnosis_start.end() + diagnosis_end.start() if diagnosis_end else len(text)
+            sections["Diagnosis"] = text[diagnosis_start.end():diagnosis_end_pos].strip()
         
         if hospital_course_start and hospital_course_end:
             sections["Hospital Course"] = text[hospital_course_start.end():hospital_course_end.start()].strip()
@@ -73,9 +86,9 @@ def extract_sections(text, is_ground_truth=False):
         sections["Discharge Instructions"] = discharge_instructions_text
     
     else:
-        diag_pattern = re.compile(r"Part 1: Diagnosis|## 1. Diagnosis:")
-        hosp_pattern = re.compile(r"Part 2: Hospital Course Summary|## 2. Hospital Course Summary:")
-        discharge_pattern = re.compile(r"Part 3: Discharge Instructions|## 3. Discharge Instructions;")
+        diag_pattern = re.compile(r"\*{0,2}Part 1: Diagnosis\*{0,2}|## 1\. Diagnosis:")
+        hosp_pattern = re.compile(r"\*{0,2}Part 2: Hospital Course Summary\*{0,2}|## 2\. Hospital Course Summary:")
+        discharge_pattern = re.compile(r"\*{0,2}Part 3: Discharge Instructions\*{0,2}|## 3\. Discharge Instructions:")
 
         # Find Part 1: Diagnosis (first occurrence)
         diagnosis_match = diag_pattern.search(text)
@@ -109,6 +122,8 @@ def extract_sections(text, is_ground_truth=False):
     return sections
 
 def calculate_cui_fscore(generated_dir, ground_truth_dir):
+    if quickumls is None:
+        return {section: (0.0, 0.0) for section in SEMANTIC_TYPES}
     section_scores = {section: [] for section in SEMANTIC_TYPES}
 
     for gen_filename in os.listdir(generated_dir):
@@ -143,6 +158,8 @@ def calculate_cui_fscore(generated_dir, ground_truth_dir):
     return results
 
 def extract_cuis_with_filter(text, semantic_types):
+    if quickumls is None:
+        return set()
     matches = quickumls.match(text, best_match=True, ignore_syntax=False)
     cuis = set()
     for match in matches:

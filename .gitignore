@@ -3,6 +3,9 @@ note/
 outputs/
 checkpoints/
 wandb/
+.venv*/
+venv/
+env/
 *.ckpt
 *.pt
 *.pth
@@ -11,6 +14,18 @@ wandb/
 *.gz
 *.csv.gz
 *.log
+
+# Licensed UMLS resources and generated QuickUMLS indexes are large and should
+# not be committed.
+data/
+data_*/
+data_backup*/
+mimic-iv-*/
+data/umls/
+data/quickumls/
+
+evaluation/*outputs*/
+experiments/**/outputs*/
 
 __pycache__/
 .ipynb_checkpoints/

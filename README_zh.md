@@ -41,6 +41,72 @@ bash run_event_ap_fix_v2.sh mistral gt
 nohup bash monitor_and_run_v2.sh mistral gt > monitor_v2.log 2>&1 &
 ```
 
+## 从 MIMIC-III 原始数据生成任务
+
+如果已经下载 MIMIC-III 原始数据，例如：
+
+```text
+C:\Users\dsw54\Desktop\MIMIC_related\mimic-iii-20260513T124356Z-3-001\mimic-iii
+```
+
+可以先生成旧代码需要的 filtered 数据，再生成 AP/DS 任务：
+
+PowerShell/Windows 推荐：
+
+```powershell
+.\run_prepare_mimic3_tasks.ps1 -SampleSize 100
+```
+
+Bash 环境：
+
+```bash
+bash run_prepare_mimic3_tasks.sh 100 \
+  "C:/Users/dsw54/Desktop/MIMIC_related/mimic-iii-20260513T124356Z-3-001/mimic-iii"
+```
+
+这个命令会做三件事：
+
+1. 从原始 MIMIC-III 中筛选 ICU admission：年龄大于等于 65、ICU LOS 大于 3 天、默认排除院内死亡。
+2. 生成旧脚本需要的 filtered 文件：
+
+```text
+data/target_population/filtered/filtered_ICUSTAYS.csv
+data/target_population/filtered/filtered_NOTEEVENTS.csv
+data/target_population/filtered/filtered_CHARTEVENTS.csv
+data/target_population/filtered/filtered_LABEVENTS.csv
+data/target_population/filtered/filtered_INPUTEVENTS_CV.csv
+data/target_population/filtered/filtered_INPUTEVENTS_MV.csv
+data/target_population/filtered/filtered_PRESCRIPTIONS.csv
+data/MIMIC-III/D_ITEMS.csv
+data/MIMIC-III/D_LABITEMS.csv
+```
+
+3. 调用原始 chronology 脚本生成任务文件：
+
+```text
+data/AP/input/
+data/AP/gold/
+data/DS/input/
+data/DS/gold/
+```
+
+生成后会自动运行：
+
+```bash
+python processing/validate_mimic3_tasks.py --data-root data
+```
+
+用来检查 AP gold 是否像 physician progress notes、DS gold 是否包含出院小结核心章节，以及输入行数是否合理。
+
+如果只想生成 filtered 数据，不自动生成 AP/DS：
+
+```bash
+python processing/prepare_mimic3_tasks.py \
+  --raw-dir "C:/Users/dsw54/Desktop/MIMIC_related/mimic-iii-20260513T124356Z-3-001/mimic-iii" \
+  --output-root data \
+  --sample-size 100
+```
+
 ## 实验 1：无训练 embedding prefilter
 
 这是最小闭环。它不训练任何小模型，直接复用已有 LLM 作为 frozen embedding encoder。

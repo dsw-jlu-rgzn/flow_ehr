@@ -57,13 +57,13 @@ TREND_SPECS = {
         "min_pct_delta": 0.2,
     },
     "potassium": {
-        "keywords": ["potassium", " k "],
+        "keywords": ["potassium"],
         "unit": "",
         "min_abs_delta": 0.5,
         "min_pct_delta": 0.12,
     },
     "sodium": {
-        "keywords": ["sodium", " na "],
+        "keywords": ["sodium"],
         "unit": "",
         "min_abs_delta": 4.0,
         "min_pct_delta": 0.03,
@@ -157,6 +157,33 @@ def parse_numeric_value(text: str) -> float | None:
     return values[0]
 
 
+def parse_metric_value(text: str, keywords: list[str]) -> float | None:
+    """Extract the value attached to a specific metric from a mixed EHR row."""
+
+    text = normalize_text(text)
+    for keyword in keywords:
+        keyword_pattern = re.escape(keyword.strip())
+        if not keyword_pattern:
+            continue
+
+        patterns = [
+            rf"\b{keyword_pattern}\b\s*(?:is|:|=)?\s*([-+]?\d+(?:\.\d+)?)",
+            rf"([-+]?\d+(?:\.\d+)?)\s*[A-Za-z/%]*\s+(?:of\s+)?\b{keyword_pattern}\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            try:
+                value = float(match.group(1))
+            except ValueError:
+                continue
+            if -1000.0 <= value <= 10000.0:
+                return value
+
+    return None
+
+
 def contains_keyword(text: str, keywords: list[str]) -> bool:
     padded = f" {text.lower()} "
     return any(keyword in padded for keyword in keywords)
@@ -174,9 +201,7 @@ def build_trend_snippets(day_df: pd.DataFrame) -> list[str]:
         observations = []
         for _, row in data_df.iterrows():
             text = normalize_text(row.get("TEXT", ""))
-            if not contains_keyword(text, spec["keywords"]):
-                continue
-            value = parse_numeric_value(text)
+            value = parse_metric_value(text, spec["keywords"])
             if value is None:
                 continue
             observations.append((row.get("REL_TIME", row.get("TIME", "")), value))

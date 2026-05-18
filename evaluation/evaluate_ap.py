@@ -6,7 +6,6 @@ import numpy as np
 from rouge import Rouge
 import torch
 from transformers import AutoTokenizer, AutoModel
-from quickumls import QuickUMLS
 import sys
 import argparse
 
@@ -15,13 +14,26 @@ sys.setrecursionlimit(10000)
 
 rouge = Rouge(metrics=['rouge-l'])
 
-# update with your own UMLS installation path
-quickumls = QuickUMLS(
-    "/path/to/QuickUMLS/",
-    threshold=0.9,
-    overlapping_criteria="score",
-    similarity_name="cosine",
-)
+try:
+    from quickumls import QuickUMLS
+except ImportError:
+    QuickUMLS = None
+
+quickumls = None
+if QuickUMLS is not None:
+    quickumls_path = os.environ.get("QUICKUMLS_PATH")
+    if quickumls_path:
+        try:
+            quickumls = QuickUMLS(
+                quickumls_path,
+                threshold=0.9,
+                overlapping_criteria="score",
+                similarity_name="cosine",
+            )
+        except Exception as exc:
+            print(f"QuickUMLS unavailable; CUI-F1 will be skipped. Reason: {exc}")
+    else:
+        print("QuickUMLS path not set; CUI-F1 will be skipped. Set QUICKUMLS_PATH to enable it.")
 
 tokenizer = AutoTokenizer.from_pretrained("cambridgeltl/SapBERT-from-PubMedBERT-fulltext")
 model = AutoModel.from_pretrained("cambridgeltl/SapBERT-from-PubMedBERT-fulltext")
@@ -30,11 +42,11 @@ SEMANTIC_TYPES = {"T170", "T033", "T074", "T047", "T201", "T046", "T184",
     "T031", "T029", "T023", "T041", "T048", "T061"}
 
 def read_generated_text(file_path):
-    df = pd.read_csv(file_path)
+    df = pd.read_csv(file_path, encoding="utf-8")
     return " ".join(df['TEXT'].astype(str).tolist())
 
 def read_ground_truth_text(file_path):
-    df = pd.read_csv(file_path)
+    df = pd.read_csv(file_path, encoding="utf-8")
     return " ".join(df['TEXT'].astype(str).tolist())
 
 def calculate_rouge_l_f1(generated_dir, ground_truth_dir):
@@ -134,6 +146,8 @@ def calculate_average_bert_f1(generated_dir, ground_truth_dir):
         return (0.0, 0.0)
 
 def extract_cuis_with_filter(text, semantic_types):
+    if quickumls is None:
+        return set()
     matches = quickumls.match(text, best_match=True, ignore_syntax=False)
     cuis = set()
     for match in matches:
@@ -150,6 +164,8 @@ def calculate_cui_metrics(pred_cuis, gold_cuis):
     return precision, recall, f1
 
 def calculate_cui_f1(generated_dir, ground_truth_dir):
+    if quickumls is None:
+        return (0.0, 0.0)
     f1_scores = []
 
     for gen_filename in os.listdir(generated_dir):
@@ -185,6 +201,9 @@ def main():
     # Evaluate each method and print scores
     for method in ['method-1', 'method1', 'method2']:
         method_dir = os.path.join(args.gen_dir, method)
+        if not os.path.isdir(method_dir):
+            print(f"Skipping -  {method}: missing directory {method_dir}")
+            continue
         print(f"Evaluating -  {method}:")
 
         rouge_mean, rouge_std = calculate_rouge_l_f1(method_dir, args.gt_dir)

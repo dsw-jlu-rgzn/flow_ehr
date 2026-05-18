@@ -72,6 +72,7 @@ class FrozenLLMEmbedder:
         if "device_map" not in kwargs:
             self.model.to(self.device)
         self.model.eval()
+        self.input_device = getattr(self.model, "device", self.device)
 
     @torch.no_grad()
     def encode(self, texts: list[str], batch_size: int = 4) -> np.ndarray:
@@ -85,7 +86,7 @@ class FrozenLLMEmbedder:
                 max_length=self.max_length,
                 return_tensors="pt",
             )
-            encoded = {key: value.to(self.model.device) for key, value in encoded.items()}
+            encoded = {key: value.to(self.input_device) for key, value in encoded.items()}
             outputs = self.model(**encoded, output_hidden_states=True, use_cache=False)
             hidden = outputs.hidden_states[-1]
             mask = encoded["attention_mask"].unsqueeze(-1).float()

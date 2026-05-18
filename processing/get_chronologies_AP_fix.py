@@ -2,6 +2,137 @@ import pandas as pd
 from datetime import datetime
 from tqdm import tqdm
 import os
+import argparse
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Build AP-style chronologies from MIMIC-IV target tables. "
+            "This script requires a progress-note source; radiology reports are "
+            "not used as AP targets unless explicitly requested."
+        )
+    )
+    parser.add_argument("--target-path", default="data/MIMIC-IV/target")
+    parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--gt-dir", default=None)
+    parser.add_argument(
+        "--notes-file",
+        default="",
+        help=(
+            "Optional note CSV to use for AP targets. Expected columns can be "
+            "MIMIC-III style (HADM_ID, CHARTTIME, CATEGORY, DESCRIPTION, TEXT) "
+            "or lower-case equivalents."
+        ),
+    )
+    parser.add_argument(
+        "--allow-radiology-target",
+        action="store_true",
+        help=(
+            "Explicitly build a radiology-report target dataset from "
+            "target_radiology.csv. This is not an AP dataset."
+        ),
+    )
+    return parser.parse_args()
+
+
+def normalize_note_columns(notes: pd.DataFrame) -> pd.DataFrame:
+    """Normalize common MIMIC note schemas to lower-case names used below."""
+
+    rename_map = {
+        "HADM_ID": "hadm_id",
+        "CHARTTIME": "charttime",
+        "STORETIME": "storetime",
+        "CATEGORY": "category",
+        "DESCRIPTION": "description",
+        "TEXT": "text",
+        "ROW_ID": "row_id",
+        "SUBJECT_ID": "subject_id",
+    }
+    notes = notes.rename(columns={key: value for key, value in rename_map.items() if key in notes.columns})
+    required = {"hadm_id", "charttime", "text"}
+    missing = required.difference(notes.columns)
+    if missing:
+        raise ValueError(f"Note file is missing required columns: {sorted(missing)}")
+
+    if "note_id" not in notes.columns:
+        notes["note_id"] = notes.index.astype(str)
+    if "category" not in notes.columns:
+        notes["category"] = ""
+    if "description" not in notes.columns:
+        notes["description"] = ""
+    if "note_type" not in notes.columns:
+        notes["note_type"] = ""
+    return notes
+
+
+def select_progress_notes(notes: pd.DataFrame) -> pd.DataFrame:
+    """Match the original MIMIC-III AP target rule as closely as possible."""
+
+    category = notes["category"].fillna("").astype(str)
+    description = notes["description"].fillna("").astype(str)
+    note_type = notes["note_type"].fillna("").astype(str)
+
+    mimic3_rule = category.str.strip().str.lower().eq("physician") & description.str.contains(
+        r"\bProgress Note\b", case=False, na=False
+    )
+    generic_progress_rule = (
+        description.str.contains(r"\bProgress Note\b", case=False, na=False)
+        | note_type.str.contains(r"\bProgress\b", case=False, na=False)
+    )
+    return notes[mimic3_rule | generic_progress_rule].copy()
+
+
+def load_note_frames(args) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    """Return target notes, context notes, and a target label."""
+
+    target_path = args.target_path
+    candidates = []
+    if args.notes_file:
+        candidates.append(args.notes_file)
+    candidates.extend(
+        [
+            f"{target_path}/target_noteevents.csv",
+            f"{target_path}/target_NOTEEVENTS.csv",
+            f"{target_path}/target_notes.csv",
+            f"{target_path}/target_progress_notes.csv",
+        ]
+    )
+
+    for path in candidates:
+        if not path or not os.path.exists(path):
+            continue
+        notes = normalize_note_columns(pd.read_csv(path))
+        progress = select_progress_notes(notes)
+        if progress.empty:
+            continue
+        progress_ids = set(progress["note_id"].astype(str))
+        context = notes[~notes["note_id"].astype(str).isin(progress_ids)].copy()
+        context = context[~context["note_type"].fillna("").astype(str).str.upper().eq("DS")]
+        print(f"Using progress-note targets from {path}: {len(progress)} rows")
+        return progress, context, "ap"
+
+    if args.allow_radiology_target:
+        radiology_path = f"{target_path}/target_radiology.csv"
+        if not os.path.exists(radiology_path):
+            raise FileNotFoundError(f"--allow-radiology-target was set, but {radiology_path} does not exist.")
+        notes = normalize_note_columns(pd.read_csv(radiology_path))
+        target = notes[notes["note_type"].fillna("").astype(str).str.upper().eq("RR")].copy()
+        context = notes[~notes["note_type"].fillna("").astype(str).str.upper().eq("RR")].copy()
+        if target.empty:
+            raise ValueError(f"No RR radiology reports found in {radiology_path}.")
+        print(
+            "Warning: building a radiology-report target dataset, not AP. "
+            "Use RAD output directories or rename the task accordingly."
+        )
+        return target, context, "radiology"
+
+    raise FileNotFoundError(
+        "No progress-note source was found. To build AP data aligned with the "
+        "MIMIC-III preprocessing, provide a note file with physician progress "
+        "notes via --notes-file or place target_noteevents.csv/target_notes.csv "
+        "under the target path. Refusing to use target_radiology.csv as AP gold."
+    )
 
 
 def filter(labs: pd.DataFrame, charts: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -153,10 +284,7 @@ def get_structured(hadmid: int, tab_data: tuple[pd.DataFrame, pd.DataFrame, pd.D
 
 
 def get_prog_notes(hadmid: int, notes: pd.DataFrame) -> pd.DataFrame:
-    # MIMIC-IV: radiology.csv uses 'note_type' column, 'RR' = Radiology Report
     patient_notes = notes[notes['hadm_id'] == hadmid]
-    # Use radiology reports (RR) as the primary note type for AP
-    patient_notes = patient_notes[patient_notes['note_type'] == 'RR']
     patient_notes = patient_notes.sort_values(by='charttime')
     patient_notes = patient_notes.reset_index(drop=True)
     tl_prog = patient_notes[["charttime", 'text']]
@@ -171,8 +299,9 @@ def temporal_order_note(note_df: pd.DataFrame) -> pd.DataFrame:
 
     for i in note_df.index:
         ts = note_df.loc[i, 'charttime']
-        # MIMIC-IV: use 'note_type' instead of 'CATEGORY'
-        note_type = note_df.loc[i, 'note_type']
+        note_type = note_df.loc[i, 'note_type'] if "note_type" in note_df.columns else ""
+        if not note_type and "category" in note_df.columns:
+            note_type = note_df.loc[i, "category"]
         note_text = note_df.loc[i, 'text']
         timestamps.append(ts)
         text.append(f'{note_type} note: \n{note_text}')
@@ -183,9 +312,8 @@ def temporal_order_note(note_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def get_ehr_notes(hadmid: int, notes: pd.DataFrame) -> pd.DataFrame:
-    # MIMIC-IV: radiology.csv - get non-RR notes (e.g., AR = Addendum Report)
     patient_notes = notes[notes['hadm_id'] == hadmid]
-    ehr_notes = patient_notes[patient_notes['note_type'] != 'RR']
+    ehr_notes = patient_notes
     ehr_notes = ehr_notes.dropna(subset='charttime')
     notes_tl = temporal_order_note(ehr_notes)
 
@@ -260,19 +388,15 @@ def get_gold(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def main():
+    args = parse_args()
     pd.options.mode.chained_assignment = None  # Turns off the warning
 
     # MIMIC-IV target path (output from get_target_population_fix.py)
-    target_path = 'data/MIMIC-IV/target'
+    target_path = args.target_path
 
     icu_df = pd.read_csv(f'{target_path}/target_ICUSTAYS.csv')
 
-    # MIMIC-IV: use radiology.csv instead of NOTEEVENTS
-    # radiology.csv has note_type: 'RR' (Radiology Report) and 'AR' (Addendum Report)
-    notes = pd.read_csv(f'{target_path}/target_radiology.csv')
-    
-    # Filter to radiology reports (RR) as the primary note type for AP
-    phys = notes[notes['note_type'] == 'RR']
+    target_notes, context_notes, target_kind = load_note_frames(args)
 
     # MIMIC-IV: single inputevents.csv (no CV/MV split)
     input_df = pd.read_csv(f'{target_path}/target_inputevents.csv')
@@ -285,25 +409,21 @@ def main():
     lab_items = pd.read_csv('long_data_related/longitudinal_clinical_summarization/mimic-iv-3.1/hosp/d_labitems.csv.gz')
     chart_items = pd.read_csv('long_data_related/longitudinal_clinical_summarization/mimic-iv-3.1/icu/d_items.csv.gz')
 
-    output_dir = 'data/AP/input'
-    gt_dir = 'data/AP/gold'
+    if target_kind == "radiology":
+        output_dir = args.output_dir or "data/RAD/input"
+        gt_dir = args.gt_dir or "data/RAD/gold"
+    else:
+        output_dir = args.output_dir or "data/AP/input"
+        gt_dir = args.gt_dir or "data/AP/gold"
 
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(gt_dir, exist_ok=True)
 
-    # get list of admissions that contain radiology reports - not all do
-    # Note: target ICUSTAYS and target radiology may have different hadm_ids
-    # Use radiology hadm_ids directly (they may not be in ICUSTAYS)
-    prog_ids = phys['hadm_id'].unique()
+    # Match the original MIMIC-III AP logic: only admissions with target notes.
+    prog_ids = target_notes['hadm_id'].unique()
     icu_prog = icu_df[icu_df['hadm_id'].isin(prog_ids)]
-    if len(icu_prog) > 0:
-        admission_id_list = icu_prog['hadm_id'].to_list()
-        print(f'Found {len(admission_id_list)} admissions with both ICUSTAYS and radiology data')
-    else:
-        # Fallback: use radiology hadm_ids directly (may not have ICUSTAYS data)
-        admission_id_list = list(prog_ids)
-        print(f'Warning: No overlap between ICUSTAYS and radiology hadm_ids.')
-        print(f'Using {len(admission_id_list)} radiology hadm_ids directly (may have no ICUSTAYS data)')
+    admission_id_list = icu_prog['hadm_id'].to_list()
+    print(f'Found {len(admission_id_list)} admissions with both ICUSTAYS and {target_kind} target notes')
 
     for admission_id in tqdm(admission_id_list):
         # MIMIC-IV: no DBSOURCE column, single inputevents.csv
@@ -311,8 +431,8 @@ def main():
         dictionaries = (lab_items, chart_items)
 
         struc_tl = get_structured(admission_id, tab_data, dictionaries)
-        tl_prog = get_prog_notes(admission_id, phys)
-        notes_tl = get_ehr_notes(admission_id, notes)
+        tl_prog = get_prog_notes(admission_id, target_notes)
+        notes_tl = get_ehr_notes(admission_id, context_notes)
 
         combined = pd.concat([struc_tl, tl_prog, notes_tl])
         combined = combined.dropna(subset='TIME')

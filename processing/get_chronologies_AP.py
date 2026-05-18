@@ -1,3 +1,6 @@
+import argparse
+from pathlib import Path
+
 import pandas as pd
 from datetime import datetime
 from tqdm import tqdm
@@ -223,10 +226,20 @@ def get_gold(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(zip(days, pns), columns=['DAY', 'TEXT'])
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Generate AP chronology files from filtered MIMIC-III tables.")
+    parser.add_argument("--target-path", default="data/target_population/filtered")
+    parser.add_argument("--mimic-dir", default="data/MIMIC-III")
+    parser.add_argument("--output-dir", default="data/AP/input")
+    parser.add_argument("--gt-dir", default="data/AP/gold")
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
     pd.options.mode.chained_assignment = None  # Turns off the warning
 
-    target_path = 'data/target_population/filtered'
+    target_path = args.target_path
 
     icu_df = pd.read_csv(f'{target_path}/filtered_ICUSTAYS.csv')
 
@@ -244,11 +257,13 @@ def main():
     chart_df = pd.read_csv(f'{target_path}/filtered_CHARTEVENTS.csv')
     meds_df = pd.read_csv(f'{target_path}/filtered_PRESCRIPTIONS.csv')
 
-    lab_items = pd.read_csv('data/MIMIC-III/D_LABITEMS.csv')
-    chart_items = pd.read_csv('data/MIMIC-III/D_ITEMS.csv')
+    lab_items = pd.read_csv(f'{args.mimic_dir}/D_LABITEMS.csv')
+    chart_items = pd.read_csv(f'{args.mimic_dir}/D_ITEMS.csv')
 
-    output_dir = 'data/AP/input'
-    gt_dir = 'data/AP/gold'
+    output_dir = args.output_dir
+    gt_dir = args.gt_dir
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    Path(gt_dir).mkdir(parents=True, exist_ok=True)
 
     # get list of admissions that contain physician progress notes - note all do
     prog_ids = prog['HADM_ID'].unique()

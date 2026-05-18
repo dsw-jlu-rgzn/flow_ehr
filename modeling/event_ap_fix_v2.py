@@ -87,7 +87,7 @@ def run_extraction(prompt, model, tokenizer, max_tokens=EE_MAX_TOKENS):
 
 
 def extract_day_events(current_day, df):
-    relevant_data = df[df['DAY'] == current_day]
+    relevant_data = df[(df['DAY'] == current_day) & (df['IS_NOTE'] == 0)]
 
     day_events = []
     for day, day_group in relevant_data.groupby('DAY'):
