@@ -1,4 +1,4 @@
-"""Judge direct AP baseline vs augmented AP generations with DeepSeek."""
+"""Judge direct AP baseline vs augmented AP generations with an OpenAI-compatible API."""
 
 from __future__ import annotations
 
@@ -90,6 +90,7 @@ Augmented generation:
             max_tokens=args.max_tokens,
             retries=args.retries,
             sleep_seconds=args.sleep_seconds,
+            api_key_env=args.api_key_env,
         )
         last_response = response
         try:
@@ -100,6 +101,17 @@ Augmented generation:
                 time.sleep(args.sleep_seconds * attempt)
     preview = last_response[:300].replace("\n", "\\n")
     raise RuntimeError(f"Judge JSON parse failed after {args.parse_retries} attempts: {last_error}; response={preview!r}")
+
+
+def normalize_winner(value: object) -> str:
+    winner = str(value or "").strip().lower()
+    if winner in {"baseline", "augmented", "tie"}:
+        return winner
+    if "baseline" in winner and "augmented" not in winner:
+        return "baseline"
+    if "augmented" in winner and "baseline" not in winner:
+        return "augmented"
+    return "tie"
 
 
 def judge_row(row: dict, args: argparse.Namespace) -> dict:
@@ -128,7 +140,8 @@ def judge_row(row: dict, args: argparse.Namespace) -> dict:
 
     judged = judge_pair(gold, baseline, augmented, args)
     flat = dict(row)
-    flat["winner"] = judged.get("winner", "")
+    flat["raw_winner"] = judged.get("winner", "")
+    flat["winner"] = normalize_winner(judged.get("winner", ""))
     for candidate in ["baseline", "augmented"]:
         for metric, value in judged.get(candidate, {}).items():
             if isinstance(value, (str, int, float)):
@@ -144,6 +157,11 @@ def main() -> None:
     parser.add_argument("--output-csv", default="outputs/ap_problem_state_augmented/augmented_judge_detail.csv")
     parser.add_argument("--model", default="deepseek-chat")
     parser.add_argument("--api-url", default=DEFAULT_API_URL)
+    parser.add_argument(
+        "--api-key-env",
+        default="DEEPSEEK_API_KEY",
+        help="Environment variable containing the API key for the selected OpenAI-compatible endpoint.",
+    )
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, default=1400)
     parser.add_argument("--retries", type=int, default=8)

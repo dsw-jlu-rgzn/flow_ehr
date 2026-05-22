@@ -27,5 +27,15 @@ data/quickumls/
 evaluation/*outputs*/
 experiments/**/outputs*/
 
+# Generated evaluation artifacts and paper figures. Keep scripts/reports in git,
+# but do not upload derived rubric dumps or rendered figures by default.
+evaluation/healthbench_style_rubrics/**/*.json
+evaluation/healthbench_style_rubrics/**/*.jsonl
+evaluation/healthbench_style_rubrics/*.md
+analysis/**/figures/
+analysis/**/paper_figures/*.png
+analysis/**/paper_figures/*.pdf
+analysis/**/paper_figures/*.svg
+
 __pycache__/
 .ipynb_checkpoints/

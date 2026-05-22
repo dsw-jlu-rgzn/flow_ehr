@@ -5,7 +5,8 @@ This keeps the original task data and output layouts, but replaces local
 HuggingFace inference with an OpenAI-compatible API call.
 
 Required environment variable:
-  DEEPSEEK_API_KEY
+  DEEPSEEK_API_KEY by default. Pass api_key_env to call_deepseek for other
+  OpenAI-compatible providers.
 
 Examples:
   python modeling/deepseek_api_generation.py ap --limit 2
@@ -38,10 +39,11 @@ def call_deepseek(
     max_tokens: int,
     retries: int,
     sleep_seconds: float,
+    api_key_env: str = "DEEPSEEK_API_KEY",
 ) -> str:
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    api_key = os.environ.get(api_key_env)
     if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY is not set.")
+        raise RuntimeError(f"{api_key_env} is not set.")
 
     payload = {
         "model": model,
@@ -56,6 +58,8 @@ def call_deepseek(
         "max_tokens": max_tokens,
         "stream": False,
     }
+    if model.lower().startswith("qwen/"):
+        payload["enable_thinking"] = False
     data = json.dumps(payload).encode("utf-8")
     headers = {
         "Authorization": f"Bearer {api_key}",

@@ -14,6 +14,7 @@ import argparse
 import csv
 import json
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -41,16 +42,28 @@ def parse_json_response(text: str) -> Any:
 
 
 def call_json(prompt: str, args: argparse.Namespace, max_tokens: int | None = None) -> Any:
-    response = call_deepseek(
-        prompt=prompt,
-        model=args.model,
-        api_url=args.api_url,
-        temperature=args.temperature,
-        max_tokens=max_tokens or args.scaffold_max_tokens,
-        retries=args.retries,
-        sleep_seconds=args.sleep_seconds,
-    )
-    return parse_json_response(response)
+    last_error = None
+    last_response = ""
+    for attempt in range(1, args.parse_retries + 1):
+        response = call_deepseek(
+            prompt=prompt,
+            model=args.model,
+            api_url=args.api_url,
+            temperature=args.temperature,
+            max_tokens=max_tokens or args.scaffold_max_tokens,
+            retries=args.retries,
+            sleep_seconds=args.sleep_seconds,
+            api_key_env=args.api_key_env,
+        )
+        last_response = response
+        try:
+            return parse_json_response(response)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            if attempt < args.parse_retries:
+                time.sleep(args.sleep_seconds * attempt)
+    preview = last_response[:300].replace("\n", "\\n")
+    raise RuntimeError(f"JSON parse failed after {args.parse_retries} attempts: {last_error}; response={preview!r}")
 
 
 def load_or_run_json(path: Path, runner) -> Any:
@@ -311,7 +324,317 @@ Today's EHR:
 """
 
 
+def build_scaffold_prompt_v2_cui_recall(case_inputs: dict) -> str:
+    previous_context = case_inputs["previous_context"] or "(No previous note context is available.)"
+    return f"""Build a CUI-recall-oriented V2 scaffold for today's ICU Assessment & Plan.
+
+Use only the previous note context and today's EHR. This scaffold is a planning
+aid, not the final note. It must improve clinical concept coverage without
+carrying forward stale or unsupported problems.
+
+Optimization target:
+- Preserve specific clinical concepts that should appear in the final A&P:
+  diagnoses, active problems, medications/treatments, procedures/devices,
+  lab/physiology abnormalities, microbiology/infection findings, and major
+  goals-of-care or disposition state changes.
+- Avoid replacing specific concepts with generic labels. For example, keep
+  "sustained VT on amiodarone infusion" rather than "arrhythmia"; keep
+  "neutropenic fever on vancomycin/cefepime/metronidazole/voriconazole" rather
+  than "infection".
+- Do not carry forward pressors, ventilation, dialysis/CRRT, antibiotics,
+  anticoagulation, nutrition route, procedures, or comfort-measures/death
+  status unless today's EHR supports the current state.
+
+Step 1. Extract must_cover_concepts:
+- Include high-confidence concepts from today's EHR and unresolved prior major
+  A&P headings that are still supported today.
+- Each concept must have a specific evidence quote and a today_status.
+- Prefer concrete medical terms over broad organ-system categories.
+
+Step 2. Assign active-state labels to prior and candidate problems:
+- active_today: should usually appear in the final A&P.
+- worsening_today or improving_today: should appear with its status change.
+- resolved_today: may be mentioned briefly as resolved/off/discontinued, but
+  must not receive an active treatment plan.
+- historical_context_only: may appear only in the assessment background.
+- unsupported_today: must not appear in the final A&P.
+
+Step 3. Build active_ap_problems:
+- Promote concrete active_today, worsening_today, and improving_today problems
+  into active_ap_problems.
+- Use specific problem names that contain the core clinical concept.
+- Keep at most 8 active_ap_problems, but do not collapse distinct high-priority
+  concepts into generic headings.
+- Routine prophylaxis, access, isolated labs, single medication administrations,
+  and generic monitoring should not become standalone sections unless today's
+  clinician text makes them a treatment target or they cause a major state
+  change.
+
+Return only valid JSON with this schema:
+{{
+  "global_status": {{
+    "overall_trajectory": "improving|worsening|stable|mixed|unclear",
+    "current_severity": "critical|serious|stable|unclear",
+    "one_sentence_summary": ""
+  }},
+  "must_cover_concepts": [
+    {{
+      "concept": "",
+      "category": "active_problem|medication_treatment|procedure_device|lab_physiology|infection_microbiology|goals_disposition_status",
+      "today_status": "active_today|worsening_today|improving_today|resolved_today|historical_context_only|unsupported_today|unclear",
+      "priority": "must_cover|should_cover|background_only|do_not_include",
+      "evidence": "",
+      "target_section": ""
+    }}
+  ],
+  "active_state_audit": [
+    {{
+      "item": "",
+      "prior_or_candidate_claim": "",
+      "today_status": "active_today|worsening_today|improving_today|resolved_today|historical_context_only|unsupported_today|unclear",
+      "today_evidence": "",
+      "output_rule": "standalone_section|merge_into_related_section|brief_resolved_update|background_only|exclude"
+    }}
+  ],
+  "carry_forward_major_headings": [
+    {{
+      "heading": "",
+      "prior_status": "active|improving|worsening|stable|resolved|unclear",
+      "today_status": "active_today|worsening_today|improving_today|resolved_today|historical_context_only|unsupported_today|unclear",
+      "carry_forward_reason": ""
+    }}
+  ],
+  "candidate_problem_pool": [
+    {{
+      "problem": "",
+      "source": "prior_major_heading|today_status_change|new_possible_problem|disposition|uncertainty|must_cover_concept",
+      "specific_concepts_to_preserve": [],
+      "should_promote": true,
+      "promotion_reason": "",
+      "if_not_promoted_where": "active_ap_problems|watchlist|supportive_care|resolved_problems|exclude"
+    }}
+  ],
+  "active_ap_problems": [
+    {{
+      "problem": "",
+      "today_status": "new|continued|improving|worsening|stable|resolved|unclear",
+      "section_role": "primary_section|merged_into_existing_section|brief_monitoring",
+      "merge_target": "",
+      "must_cover_concepts_used": [],
+      "why_active_today": "",
+      "supporting_evidence": ["up to 4 concise evidence statements"],
+      "plan_actions": ["up to 4 concrete actions or monitoring items"],
+      "confidence": "high|medium|low"
+    }}
+  ],
+  "watchlist": [
+    {{
+      "item": "",
+      "reason_not_active_ap_problem": "",
+      "monitoring_plan": ""
+    }}
+  ],
+  "supportive_care": [
+    {{
+      "item": "",
+      "reason_not_active_ap_problem": "",
+      "routine_plan": ""
+    }}
+  ],
+  "resolved_problems": [],
+  "unsupported_or_stale_concepts": [
+    {{
+      "concept": "",
+      "reason_to_exclude_or_downgrade": "",
+      "today_evidence": ""
+    }}
+  ],
+  "uncertainties": [],
+  "promotion_gate_notes": []
+}}
+
+Previous note context:
+{previous_context}
+
+Today's EHR:
+{case_inputs["current_ehr"]}
+"""
+
+
+def build_scaffold_prompt_v3(case_inputs: dict) -> str:
+    previous_context = case_inputs["previous_context"] or "(No previous note context is available.)"
+    return f"""Build an Evidence-Hierarchy Gated Scaffold V3 for today's ICU Assessment & Plan.
+
+Use only the previous note context and today's EHR. This is a no-training,
+dataset-agnostic evidence gate. Do not rely on disease-specific, medication-
+specific, lab-specific, admission-specific, or MIMIC-specific rules. Use source
+strength and documented state changes to decide what may appear in the final
+A&P.
+
+The goal is to preserve longitudinal trajectory while preventing weak evidence
+from becoming unsupported active problems or unsupported plan actions.
+
+Step 1. Extract evidence_events:
+- Extract concise events from today's EHR without expanding them into new
+  diagnoses or plans.
+- Medication administration only proves that a medication was administered.
+- An isolated lab only proves the lab value; do not infer a diagnosis unless
+  clinician text or a treatment decision explicitly supports it.
+- Case-management/social-work text may inform disposition but cannot alone
+  create a medical active problem.
+
+Step 2. Track prior_problem_states:
+- Identify major active problems or A&P headings from the previous context.
+- Decide whether each is continued, improving, worsening, resolved, or unclear
+  using today's EHR.
+- If the previous generated note conflicts with today's EHR, mark the conflict
+  and revise/drop the prior claim instead of carrying it forward.
+- Preserve note continuity without overfitting: if a prior major A&P heading is
+  not clearly resolved and not contradicted, keep it in must_carry_forward_sections
+  even when today's evidence is thin. It may be written as a short continued/
+  uncertain update rather than promoted as a primary active problem.
+
+Step 3. Apply the hard promotion gate:
+Promote a candidate to active_ap_problems only if at least one condition holds:
+1. prior_active_with_today_support: prior A&P treated it as active and today's
+   EHR corroborates continuation or a status change;
+2. clinician_assessment_plan: today's clinician assessment/plan explicitly
+   discusses the problem as a diagnosis, treatment target, or major management
+   issue;
+3. procedure_or_imaging_decision: procedure, imaging, or consult creates a new
+   diagnosis or concrete treatment/disposition decision;
+4. major_state_change: documented intubation/extubation, pressor start/stop,
+   antibiotic start/stop, dialysis/CRRT start/stop, NPO/tube-feed/PO diet
+   change, surgery/procedure, bleeding event, code-status/CMO/hospice change,
+   ICU/floor transfer, or another major care-state transition.
+
+Do NOT promote if the only support is:
+- a single medication administration;
+- an isolated abnormal lab;
+- routine ICU care, prophylaxis, nutrition, access, or generic monitoring;
+- case-management/social-work text without clinical corroboration;
+- a plausible but unstated diagnosis;
+- a previous generated-note claim without today's corroborating evidence.
+
+Plan-action gate:
+- allowed_plan_actions must be directly supported by today's EHR or a carried
+  forward prior active plan with today's support.
+- Do not invent consults, imaging, antibiotics, anticoagulation, dialysis,
+  ventilator changes, or medication titrations merely because they seem
+  clinically reasonable.
+
+Contradiction audit:
+- Explicitly audit any high-impact care state when present, using the evidence
+  wording from the chart rather than fixed vocab: respiratory support state,
+  hemodynamic support state, anti-infective treatment state, nutrition route,
+  renal replacement status, procedure/surgery status, bleeding status,
+  infection status, mobility/disposition status, and goals-of-care/code-status
+  trajectory.
+
+Return only valid JSON with this schema:
+{{
+  "global_status": {{
+    "overall_trajectory": "improving|worsening|stable|mixed|unclear",
+    "current_severity": "critical|serious|stable|unclear",
+    "one_sentence_summary": ""
+  }},
+  "evidence_events": [
+    {{
+      "event": "",
+      "source_type": "clinician_note|radiology|lab|med_admin|respiratory_note|nursing|case_management|other",
+      "evidence_text": "",
+      "inference_level": "direct|weak_inference|unsupported",
+      "confidence": "high|medium|low"
+    }}
+  ],
+  "prior_problem_states": [
+    {{
+      "problem": "",
+      "today_status": "continued|improving|worsening|resolved|unclear",
+      "supporting_evidence": [],
+      "contradicting_evidence": [],
+      "carry_forward_decision": "carry_forward|revise|drop|unclear"
+    }}
+  ],
+  "must_carry_forward_sections": [
+    {{
+      "heading": "",
+      "reason_to_preserve": "prior_major_heading_not_resolved|prior_major_heading_uncertain|documented_chronic_active_issue|today_mentions_related_management",
+      "today_update": "continued|improving|worsening|resolved|unclear",
+      "supporting_or_limiting_evidence": [],
+      "final_note_role": "primary_section|secondary_update|one_line_monitoring"
+    }}
+  ],
+  "disposition_and_goals": {{
+    "current_location_or_level_of_care": "",
+    "transfer_or_discharge_trajectory": "",
+    "goals_or_code_status_context": "",
+    "family_or_team_communication": "",
+    "evidence": [],
+    "confidence": "high|medium|low|unclear"
+  }},
+  "active_ap_problems": [
+    {{
+      "problem": "",
+      "today_status": "new|continued|improving|worsening|resolved|unclear",
+      "section_role": "primary_section|merged_into_existing_section|brief_monitoring",
+      "merge_target": "",
+      "promotion_reason": "",
+      "promotion_evidence_type": "prior_active_with_today_support|clinician_assessment_plan|procedure_or_imaging_decision|major_state_change",
+      "supporting_evidence": ["up to 3 concise evidence statements"],
+      "allowed_plan_actions": ["up to 3 concrete actions supported by evidence"],
+      "confidence": "high|medium"
+    }}
+  ],
+  "watchlist": [
+    {{
+      "item": "",
+      "reason_not_active_ap_problem": "",
+      "monitoring_plan": ""
+    }}
+  ],
+  "supportive_care": [
+    {{
+      "item": "",
+      "reason_not_active_ap_problem": "",
+      "routine_plan": ""
+    }}
+  ],
+  "rejected_candidates": [
+    {{
+      "candidate": "",
+      "rejection_reason": "",
+      "evidence_type": "med_admin_only|isolated_lab_only|case_management_only|routine_care_only|previous_claim_without_today_support|plausible_but_unstated|other",
+      "unsafe_if_promoted": true
+    }}
+  ],
+  "contradiction_audit": [
+    {{
+      "field": "",
+      "candidate_or_prior_claim": "",
+      "today_evidence": "",
+      "decision": "remove|revise|keep_uncertain"
+    }}
+  ],
+  "resolved_problems": [],
+  "uncertainties": []
+}}
+
+Previous note context:
+{previous_context}
+
+Today's EHR:
+{case_inputs["current_ehr"]}
+"""
+
+
 def build_scaffold_prompt(case_inputs: dict, args: argparse.Namespace) -> str:
+    if args.prompt_version == "v3":
+        return build_scaffold_prompt_v3(case_inputs)
+    if args.prompt_version == "v2_cui_recall":
+        return build_scaffold_prompt_v2_cui_recall(case_inputs)
+    if args.prompt_version == "v2_judge_cui_guard":
+        return build_scaffold_prompt_v2(case_inputs)
     if args.prompt_version == "v2":
         return build_scaffold_prompt_v2(case_inputs)
     return build_scaffold_prompt_v1(case_inputs)
@@ -382,13 +705,152 @@ Use the scaffold this way:
 """
 
 
+def build_generation_prompt_v2_cui_recall(case_inputs: dict, scaffold: dict) -> str:
+    ehr_str = case_inputs["current_ehr"]
+    if case_inputs["previous_context"]:
+        ehr_str += "\n\nPrevious progress note context:\n" + case_inputs["previous_context"]
+
+    scaffold_str = json.dumps(scaffold, ensure_ascii=False, indent=2)
+    return f"""{AP_INSTRUCTION_1}{ehr_str}
+
+CUI-recall-oriented V2 scaffold:
+This scaffold is a clinical planning aid. Use it to preserve specific clinical
+concepts while avoiding stale or unsupported carry-forward.
+
+Generation rules:
+- Cover all must_cover_concepts with priority=must_cover unless today's raw EHR
+  contradicts them.
+- Use specific problem headings that include the concrete clinical concept.
+  Do not replace VT, AFib, pneumonia, PE/DVT, AKI, vancomycin, IABP, dialysis,
+  pressors, CMO/death, or other specific charted concepts with generic labels
+  such as arrhythmia, infection, organ failure, or complex ICU course.
+- For active_state_audit items, follow output_rule exactly:
+  standalone_section may be its own section; merge_into_related_section must be
+  folded into a related section; brief_resolved_update must be stated only as
+  resolved/off/discontinued; background_only belongs only in the assessment;
+  exclude must not appear.
+- Use active_ap_problems with section_role=primary_section as main A&P
+  subsections. Merge section_role=merged_into_existing_section items into their
+  merge_target or closest concrete section.
+- Use candidate_problem_pool as recall backup only when the raw EHR supports the
+  specific_concepts_to_preserve today.
+- Include medication/treatment, procedure/device, lab/physiology, infection/
+  microbiology, and goals/disposition concepts when they are high-confidence and
+  affect today's assessment or plan.
+- Do not carry forward pressors, ventilation, dialysis/CRRT, antibiotics,
+  anticoagulation, nutrition route, procedures, or comfort-measures/death status
+  as active unless today's raw EHR supports the current status.
+- Before finalizing, silently check that high-priority concepts are covered and
+  stale/unsupported concepts are excluded. Output only the final A&P.
+
+{scaffold_str}
+
+{AP_INSTRUCTION_2}
+"""
+
+
+def build_generation_prompt_v3(case_inputs: dict, scaffold: dict) -> str:
+    ehr_str = case_inputs["current_ehr"]
+    if case_inputs["previous_context"]:
+        ehr_str += "\n\nPrevious progress note context:\n" + case_inputs["previous_context"]
+
+    scaffold_str = json.dumps(scaffold, ensure_ascii=False, indent=2)
+    return f"""{AP_INSTRUCTION_1}{ehr_str}
+
+Evidence-Hierarchy Gated Scaffold V3:
+This scaffold has already separated approved active A&P problems from
+watchlist, supportive care, rejected candidates, and contradiction audits.
+
+Conservative generation rules:
+- Only active_ap_problems may become major A&P sections.
+- Also preserve must_carry_forward_sections according to final_note_role:
+  primary_section may be a section, secondary_update should be a short
+  subsection or paragraph, and one_line_monitoring should be a concise line
+  under a related approved section. Do not drop unresolved prior major headings
+  solely because today's evidence is sparse.
+- Use section_role=primary_section as standalone sections. Merge
+  section_role=merged_into_existing_section into its merge_target or the
+  closest approved active section. Mention section_role=brief_monitoring only
+  briefly.
+- Do not create new diagnoses, active problems, severity changes, or plan
+  actions that are not in active_ap_problems.allowed_plan_actions.
+- Include disposition_and_goals when evidence is present, even if it is not an
+  active medical problem. Keep it concise and do not invent a destination,
+  prognosis, code status, or family discussion beyond the scaffold evidence.
+- Watchlist items may appear only as one-line monitoring/uncertainty within a
+  related approved section. Do not make them standalone sections.
+- Supportive_care may appear only under ICU care/prophylaxis/nutrition or as
+  routine care; do not make it a main diagnosis.
+- Rejected candidates must not appear in the final A&P.
+- If contradiction_audit says remove or revise a prior/candidate claim, follow
+  that decision and do not carry the contradicted claim forward.
+- If evidence is uncertain, state uncertainty rather than resolving it.
+- Do not infer disease identity from a medication, isolated lab, or social/case
+  management note unless the approved scaffold promoted it with a valid
+  promotion_evidence_type.
+- Keep the final note concise and close to a physician A&P, not an evidence
+  dump.
+
+{scaffold_str}
+
+{AP_INSTRUCTION_2}
+"""
+
+
 def build_generation_prompt(case_inputs: dict, scaffold: dict, args: argparse.Namespace) -> str:
+    if args.prompt_version == "v3":
+        return build_generation_prompt_v3(case_inputs, scaffold)
+    if args.prompt_version == "v2_cui_recall":
+        return build_generation_prompt_v2_cui_recall(case_inputs, scaffold)
+    if args.prompt_version == "v2_judge_cui_guard":
+        return build_generation_prompt_v2_cui_guard(case_inputs, scaffold)
     if args.prompt_version == "v2":
         return build_generation_prompt_v2(case_inputs, scaffold)
     return build_generation_prompt_v1(case_inputs, scaffold)
 
 
-def build_transition_judge_prompt(case_inputs: dict, scaffold: dict, candidate_ap: str) -> str:
+def build_generation_prompt_v2_cui_guard(case_inputs: dict, scaffold: dict) -> str:
+    ehr_str = case_inputs["current_ehr"]
+    if case_inputs["previous_context"]:
+        ehr_str += "\n\nPrevious progress note context:\n" + case_inputs["previous_context"]
+
+    scaffold_str = json.dumps(scaffold, ensure_ascii=False, indent=2)
+    return f"""{AP_INSTRUCTION_1}{ehr_str}
+
+Coverage-preserving memory-gated scaffold:
+Use this scaffold to write a clinically grounded ICU Assessment & Plan while
+preserving concrete, evidence-supported clinical concepts.
+
+Rules:
+- Do not make the note shorter by deleting supported clinical concepts.
+- Preserve specific diagnoses, medications/treatments, procedures/devices,
+  lab/physiology abnormalities, microbiology/infection findings, and care-state
+  concepts when they are supported by today's EHR or an unresolved prior A&P.
+- If a medication, procedure, infusion, device, or culture is documented but
+  its indication is unclear, keep the concept and write "clarify indication" or
+  "continue/adjust per team guidance" rather than deleting it.
+- Downgrade stale or contradicted concepts by status: resolved/off/held/
+  discontinued/historical background. Do not keep them active.
+- Do not replace specific concepts with generic labels. Use "sustained VT on
+  amiodarone/quinidine", "neutropenic fever on vancomycin/cefepime", "AKI on
+  CRRT", "PE/DVT on heparin", etc. rather than "arrhythmia", "infection", or
+  "renal dysfunction" when the chart is specific.
+- Use active_ap_problems as the main sections, but also use
+  candidate_problem_pool and carry_forward_major_headings to recover supported
+  concepts that should not be lost.
+- Before finalizing, silently check that no supported concept from the scaffold
+  or today's EHR was deleted solely for concision.
+
+{scaffold_str}
+
+{AP_INSTRUCTION_2}
+"""
+
+
+def build_transition_judge_prompt(case_inputs: dict, scaffold: dict, candidate_ap: str, args: argparse.Namespace) -> str:
+    if args.prompt_version == "v2_judge_cui_guard":
+        return build_transition_judge_prompt_cui_guard(case_inputs, scaffold, candidate_ap)
+
     previous_note = case_inputs["previous_latest_note"] or "(No previous A&P note is available.)"
     scaffold_str = json.dumps(scaffold, ensure_ascii=False, indent=2)
     return f"""Judge whether the candidate ICU Assessment & Plan is a safe and evidence-supported day-to-day update.
@@ -472,7 +934,121 @@ Candidate A&P:
 """
 
 
+def build_transition_judge_prompt_cui_guard(case_inputs: dict, scaffold: dict, candidate_ap: str) -> str:
+    previous_note = case_inputs["previous_latest_note"] or "(No previous A&P note is available.)"
+    scaffold_str = json.dumps(scaffold, ensure_ascii=False, indent=2)
+    return f"""Judge the candidate ICU Assessment & Plan with a coverage-preserving clinical concept guard.
+
+Use only:
+- the latest previous A&P note,
+- today's raw EHR,
+- the candidate A&P,
+- the candidate memory-gated scaffold.
+
+Do not use the gold current-day A&P.
+
+Goal:
+Improve evidence grounding without reducing supported clinical concept coverage.
+Your job is not to make the note shorter. Your job is to preserve all
+evidence-supported concepts while fixing unsupported or stale claims.
+
+Definitions:
+- Supported concept: a specific diagnosis/problem, medication/treatment,
+  procedure/device, lab/physiology abnormality, microbiology/infection finding,
+  infusion, nutrition route, respiratory/hemodynamic/renal replacement state,
+  goals-of-care or disposition state that appears in today's EHR or remains an
+  unresolved prior major A&P issue.
+- Stale concept: contradicted by today's EHR or only historical with no current
+  relevance.
+- Unclear-indication concept: documented medication/procedure/device/culture
+  where the chart shows exposure but not the reason. Preserve it with "clarify
+  indication" instead of deleting it.
+
+Check:
+1. Which candidate concepts are supported and must be preserved?
+2. Which supported concepts from today's EHR/scaffold are missing and must be
+   added?
+3. Which candidate concepts are stale, contradicted, or unsupported and should
+   be removed or downgraded?
+4. Which specific concepts were replaced by generic wording and should be made
+   concrete again?
+
+Return only valid JSON:
+{{
+  "supported_concepts_to_preserve": [
+    {{
+      "concept": "",
+      "category": "diagnosis_problem|medication_treatment|procedure_device|lab_physiology|infection_microbiology|care_state|goals_disposition",
+      "status": "active|improving|worsening|resolved|administered_or_ordered|held_or_discontinued|historical_background|unclear",
+      "evidence": [],
+      "must_appear_in_revision": true
+    }}
+  ],
+  "missing_high_confidence_concepts_to_add": [
+    {{
+      "concept": "",
+      "category": "diagnosis_problem|medication_treatment|procedure_device|lab_physiology|infection_microbiology|care_state|goals_disposition",
+      "today_evidence": [],
+      "target_section": "",
+      "required_wording": ""
+    }}
+  ],
+  "unsupported_or_stale_concepts_to_remove_or_downgrade": [
+    {{
+      "concept": "",
+      "reason": "",
+      "today_evidence_or_conflict": "",
+      "required_handling": "remove|brief_resolved_update|historical_background|uncertain_clarify_indication"
+    }}
+  ],
+  "generic_to_specific_rewrites": [
+    {{
+      "generic_phrase": "",
+      "specific_replacement": "",
+      "evidence": ""
+    }}
+  ],
+  "scaffold_revision_suggestions": [
+    {{
+      "target": "active_ap_problems|candidate_problem_pool|watchlist|supportive_care|resolved_problems|uncertainties",
+      "action": "add|remove|downgrade|merge|revise|preserve",
+      "item": "",
+      "reason": ""
+    }}
+  ],
+  "coverage_guard": {{
+    "candidate_supported_concept_count_estimate": 0,
+    "concepts_at_risk_of_being_lost": [],
+    "overall_decision": "accept|revise_minor|revise_major"
+  }}
+}}
+
+Keep the JSON concise:
+- At most 12 supported_concepts_to_preserve.
+- At most 10 missing_high_confidence_concepts_to_add.
+- At most 10 unsupported_or_stale_concepts_to_remove_or_downgrade.
+- At most 8 generic_to_specific_rewrites.
+- At most 10 scaffold_revision_suggestions.
+- Each evidence array may contain at most 2 short quotes.
+
+Latest previous A&P:
+{previous_note}
+
+Today's raw EHR:
+{case_inputs["current_ehr"]}
+
+Candidate scaffold:
+{scaffold_str}
+
+Candidate A&P:
+{candidate_ap}
+"""
+
+
 def build_revise_scaffold_prompt(scaffold: dict, judge: dict, case_inputs: dict, args: argparse.Namespace) -> str:
+    if args.prompt_version == "v2_judge_cui_guard":
+        return build_revise_scaffold_prompt_cui_guard(scaffold, judge, case_inputs)
+
     scaffold_str = json.dumps(scaffold, ensure_ascii=False, indent=2)
     judge_str = json.dumps(judge, ensure_ascii=False, indent=2)
     schema_hint = "V2" if args.prompt_version == "v2" else "V1"
@@ -506,6 +1082,45 @@ Today's raw EHR:
 """
 
 
+def build_revise_scaffold_prompt_cui_guard(scaffold: dict, judge: dict, case_inputs: dict) -> str:
+    scaffold_str = json.dumps(scaffold, ensure_ascii=False, indent=2)
+    judge_str = json.dumps(judge, ensure_ascii=False, indent=2)
+    return f"""Revise the V2 memory-gated scaffold using the coverage-preserving judge feedback.
+
+Return only valid JSON in the same V2 scaffold schema. Do not write the final
+A&P. Do not use gold current-day A&P.
+
+Coverage-preserving revision rules:
+- Preserve every item in supported_concepts_to_preserve unless today's raw EHR
+  clearly contradicts it.
+- Add every item in missing_high_confidence_concepts_to_add when supported by
+  today's raw EHR.
+- Remove or downgrade only concepts listed in
+  unsupported_or_stale_concepts_to_remove_or_downgrade, and follow the required
+  handling. If required_handling is uncertain_clarify_indication, keep the
+  concept in watchlist/supportive_care or a related active problem with explicit
+  uncertainty.
+- Do not delete documented medication/procedure/device/infusion/culture concepts
+  solely because the indication is unclear; preserve them with a clarify plan.
+- Do not replace specific concepts with generic headings. Apply
+  generic_to_specific_rewrites.
+- Put important supported concepts that should not be standalone sections into
+  candidate_problem_pool, watchlist, or supportive_care so the final generator
+  can still mention them.
+- Keep active_ap_problems at most 8. Prefer merging related concepts over
+  deleting supported concepts.
+
+Original scaffold:
+{scaffold_str}
+
+Coverage-preserving judge feedback:
+{judge_str}
+
+Today's raw EHR:
+{case_inputs["current_ehr"]}
+"""
+
+
 def generate_text(prompt: str, args: argparse.Namespace) -> str:
     return call_deepseek(
         prompt=prompt,
@@ -515,6 +1130,29 @@ def generate_text(prompt: str, args: argparse.Namespace) -> str:
         max_tokens=args.max_tokens,
         retries=args.retries,
         sleep_seconds=args.sleep_seconds,
+        api_key_env=args.api_key_env,
+    )
+
+
+def count_rejected_by_type(scaffold: dict, evidence_type: str) -> int:
+    if not isinstance(scaffold, dict):
+        return 0
+    rejected = scaffold.get("rejected_candidates", [])
+    if not isinstance(rejected, list):
+        return 0
+    return sum(1 for item in rejected if isinstance(item, dict) and item.get("evidence_type") == evidence_type)
+
+
+def count_prior_decisions(scaffold: dict, decision: str) -> int:
+    if not isinstance(scaffold, dict):
+        return 0
+    states = scaffold.get("prior_problem_states", [])
+    if not isinstance(states, list):
+        return 0
+    return sum(
+        1
+        for item in states
+        if isinstance(item, dict) and item.get("carry_forward_decision") == decision
     )
 
 
@@ -544,7 +1182,7 @@ def generate_case(args: argparse.Namespace, admission_id: str, day: int) -> dict
             judge = load_or_run_json(
                 judge_file,
                 lambda: call_json(
-                    build_transition_judge_prompt(case_inputs, scaffold, candidate),
+                    build_transition_judge_prompt(case_inputs, scaffold, candidate, args),
                     args,
                     max_tokens=args.judge_max_tokens,
                 ),
@@ -568,6 +1206,30 @@ def generate_case(args: argparse.Namespace, admission_id: str, day: int) -> dict
     supportive_count = len(scaffold.get("supportive_care", [])) if isinstance(scaffold, dict) else 0
     candidate_count = len(scaffold.get("candidate_problem_pool", [])) if isinstance(scaffold, dict) else 0
     carry_count = len(scaffold.get("carry_forward_major_headings", [])) if isinstance(scaffold, dict) else 0
+    must_cover_count = len(scaffold.get("must_cover_concepts", [])) if isinstance(scaffold, dict) else 0
+    active_state_audit_count = len(scaffold.get("active_state_audit", [])) if isinstance(scaffold, dict) else 0
+    unsupported_or_stale_count = (
+        len(scaffold.get("unsupported_or_stale_concepts", [])) if isinstance(scaffold, dict) else 0
+    )
+    evidence_event_count = len(scaffold.get("evidence_events", [])) if isinstance(scaffold, dict) else 0
+    prior_problem_state_count = len(scaffold.get("prior_problem_states", [])) if isinstance(scaffold, dict) else 0
+    must_carry_forward_count = len(scaffold.get("must_carry_forward_sections", [])) if isinstance(scaffold, dict) else 0
+    rejected_count = len(scaffold.get("rejected_candidates", [])) if isinstance(scaffold, dict) else 0
+    contradiction_count = len(scaffold.get("contradiction_audit", [])) if isinstance(scaffold, dict) else 0
+    disposition_and_goals_present = (
+        int(any(scaffold.get("disposition_and_goals", {}).values()))
+        if isinstance(scaffold, dict) and isinstance(scaffold.get("disposition_and_goals"), dict)
+        else 0
+    )
+    low_confidence_active_count = (
+        sum(
+            1
+            for item in scaffold.get("active_ap_problems", [])
+            if isinstance(item, dict) and item.get("confidence") == "low"
+        )
+        if isinstance(scaffold, dict)
+        else 0
+    )
     return {
         "config": args.config_name,
         "admission_id": admission_id,
@@ -593,8 +1255,22 @@ def generate_case(args: argparse.Namespace, admission_id: str, day: int) -> dict
         "active_ap_problem_count": active_count,
         "carry_forward_heading_count": carry_count,
         "candidate_problem_count": candidate_count,
+        "must_cover_concept_count": must_cover_count,
+        "active_state_audit_count": active_state_audit_count,
+        "unsupported_or_stale_concept_count": unsupported_or_stale_count,
         "watchlist_count": watchlist_count,
         "supportive_care_count": supportive_count,
+        "evidence_event_count": evidence_event_count,
+        "prior_problem_state_count": prior_problem_state_count,
+        "must_carry_forward_section_count": must_carry_forward_count,
+        "disposition_and_goals_present": disposition_and_goals_present,
+        "rejected_candidate_count": rejected_count,
+        "contradiction_count": contradiction_count,
+        "low_confidence_active_problem_count": low_confidence_active_count,
+        "med_admin_only_rejected_count": count_rejected_by_type(scaffold, "med_admin_only"),
+        "isolated_lab_rejected_count": count_rejected_by_type(scaffold, "isolated_lab_only"),
+        "previous_claim_revised_count": count_prior_decisions(scaffold, "revise"),
+        "previous_claim_dropped_count": count_prior_decisions(scaffold, "drop"),
         "scaffold_path": str(scaffold_file),
         "revised_scaffold_path": str(revised_scaffold_file) if args.use_judge_revise else "",
         "generation_judge_path": str(judge_file) if args.use_judge_revise else "",
@@ -615,12 +1291,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--memory-source", choices=["gold", "baseline_method", "none"], required=True)
     parser.add_argument("--model", default="deepseek-chat")
     parser.add_argument("--api-url", default=DEFAULT_API_URL)
+    parser.add_argument("--api-key-env", default="DEEPSEEK_API_KEY")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, default=1800)
     parser.add_argument("--scaffold-max-tokens", type=int, default=3200)
     parser.add_argument("--judge-max-tokens", type=int, default=3200)
     parser.add_argument("--revise-max-tokens", type=int, default=4200)
-    parser.add_argument("--prompt-version", choices=["v1", "v2"], default="v1")
+    parser.add_argument(
+        "--prompt-version",
+        choices=["v1", "v2", "v2_cui_recall", "v2_judge_cui_guard", "v3"],
+        default="v1",
+    )
     parser.add_argument("--use-judge-revise", action="store_true")
     parser.add_argument(
         "--workers",
@@ -629,6 +1310,7 @@ def parse_args() -> argparse.Namespace:
         help="Number of parallel patient-day API workers. Keep 1 for deterministic sequential runs.",
     )
     parser.add_argument("--retries", type=int, default=8)
+    parser.add_argument("--parse-retries", type=int, default=3)
     parser.add_argument("--sleep-seconds", type=float, default=6.0)
     return parser.parse_args()
 

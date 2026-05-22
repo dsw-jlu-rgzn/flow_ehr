@@ -69,6 +69,116 @@ into files:
 $env:DEEPSEEK_API_KEY = "..."
 ```
 
+### 2b. Local HuggingFace GPU generation and judge smoke test
+
+The repository also supports replacing direct API generation with open
+HuggingFace models. On Windows, first make sure the Python environment has a
+CUDA-enabled PyTorch build. The current smoke-test environment is:
+
+```powershell
+py -3.12 -m venv .venv-hf-gpu
+.\.venv-hf-gpu\Scripts\python.exe -m pip install --upgrade pip
+.\.venv-hf-gpu\Scripts\python.exe -m pip install torch torchvision torchaudio `
+  --index-url https://download.pytorch.org/whl/cu128
+.\.venv-hf-gpu\Scripts\python.exe -m pip install `
+  transformers accelerate huggingface_hub pandas tqdm safetensors sentencepiece protobuf
+```
+
+Verify GPU visibility:
+
+```powershell
+.\.venv-hf-gpu\Scripts\python.exe -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+```
+
+Expected on this machine:
+
+```text
+torch 2.11.0+cu128
+cuda True
+NVIDIA GeForce RTX 5060 Laptop GPU
+```
+
+Set the HuggingFace token only through the environment:
+
+```powershell
+$env:HF_TOKEN = "..."
+```
+
+Run a local HuggingFace A&P direct-generation smoke test. This uses a very small
+model only to verify plumbing; it is not a quality target:
+
+```powershell
+.\.venv-hf-gpu\Scripts\python.exe - <<'PY'
+from pathlib import Path
+import pandas as pd
+from modeling.deepseek_api_generation import AP_INSTRUCTION_1, AP_INSTRUCTION_2, df2chron_str
+from modeling.hf_generation import call_huggingface
+
+root = Path("data_ap100_ap")
+aid = "105351"
+day = 13
+input_df = pd.read_csv(root / "AP" / "input" / f"input_{aid}.csv")
+current = input_df[(input_df["DAY"].astype(int).eq(day)) & (input_df["IS_NOTE"].astype(int).eq(0))]
+base = pd.read_csv(root / "AP" / "generated" / "DG" / "deepseek_api_full_gen" / "gen" / "method2" / f"genpns_{aid}.csv")
+prev_rows = base[base["DAY"].astype(int).lt(day)].sort_values("DAY")
+prev = "" if prev_rows.empty else str(prev_rows.iloc[-1]["TEXT"])
+prompt = AP_INSTRUCTION_1 + df2chron_str(current) + "\n\nPrevious progress note context:\n" + prev + AP_INSTRUCTION_2
+text = call_huggingface(prompt, model="Qwen/Qwen2.5-0.5B-Instruct", backend="local", max_tokens=500, temperature=0.0)
+out = Path("outputs/hf_local_ap_1case/direct_qwen05_105351_day13.txt")
+out.parent.mkdir(parents=True, exist_ok=True)
+out.write_text(text, encoding="utf-8")
+print(out)
+PY
+```
+
+To run the existing A&P judge with a HuggingFace evaluator, prepare a one-row
+detail CSV pointing at the generated file:
+
+```powershell
+New-Item -ItemType Directory -Force -Path outputs\hf_local_ap_1case\hf_ap_direct_qwen05 | Out-Null
+Copy-Item outputs\hf_local_ap_1case\direct_qwen05_105351_day13.txt `
+  outputs\hf_local_ap_1case\hf_ap_direct_qwen05\105351_day13.txt -Force
+@'
+config,admission_id,day,baseline_run_name,baseline_setting,baseline_method,memory_source,method,prompt_version,generation_time_judge_revise,baseline_rouge_l,augmented_rouge_l,rouge_delta,baseline_words,augmented_words,gold_words
+hf_ap_direct_qwen05,105351,13,deepseek_api_full_gen,gen,method2,baseline_method,hf_local_direct,qwen05,false,0,0,0,0,0,0
+'@ | Set-Content -Path outputs\hf_local_ap_1case\hf_ap_direct_qwen05_detail.csv -Encoding UTF8
+```
+
+Mock judge, which checks the file layout without model inference:
+
+```powershell
+.\.venv-hf-gpu\Scripts\python.exe scripts\run_hf_llm_evaluation.py ap `
+  --hf-backend mock `
+  --eval-model Qwen/Qwen2.5-0.5B-Instruct `
+  --detail-csv outputs\hf_local_ap_1case\hf_ap_direct_qwen05_detail.csv `
+  --data-root data_ap100_ap `
+  --augmented-dir outputs\hf_local_ap_1case `
+  --output-csv outputs\hf_local_ap_1case\hf_ap_direct_qwen05_judge_mock.csv `
+  --retries 1 `
+  --parse-retries 1
+```
+
+Local HuggingFace judge:
+
+```powershell
+.\.venv-hf-gpu\Scripts\python.exe scripts\run_hf_llm_evaluation.py ap `
+  --hf-backend local `
+  --eval-model Qwen/Qwen2.5-0.5B-Instruct `
+  --detail-csv outputs\hf_local_ap_1case\hf_ap_direct_qwen05_detail.csv `
+  --data-root data_ap100_ap `
+  --augmented-dir outputs\hf_local_ap_1case `
+  --output-csv outputs\hf_local_ap_1case\hf_ap_direct_qwen05_judge_local.csv `
+  --temperature 0.0 `
+  --max-tokens 900 `
+  --retries 1 `
+  --parse-retries 2
+```
+
+For real experiments, use a stronger model than 0.5B. With an 8GB GPU, start
+with 1.5B/3B-class instruction models or a quantized 7B model. The 0.5B model is
+useful for verifying end-to-end scripts, but its clinical generation and judge
+quality are weak.
+
 ### 3. ProblemFlow AP experiments
 
 ProblemFlow AP is implemented in:

@@ -47,9 +47,18 @@ def rouge_l_f1(pred: str, gold: str) -> float:
 
 def extract_generated_sections(text: str) -> dict[str, str]:
     patterns = {
-        "Diagnosis": re.compile(r"(?:\*\*)?Part 1:\s*Diagnosis(?:\*\*)?", re.I),
-        "Hospital Course": re.compile(r"(?:\*\*)?Part 2:\s*Hospital Course Summary(?:\*\*)?", re.I),
-        "Discharge Instructions": re.compile(r"(?:\*\*)?Part 3:\s*Discharge Instructions(?:\*\*)?", re.I),
+        "Diagnosis": re.compile(
+            r"(?:\*\*)?(?:Part\s*1:\s*)?(?:#{1,3}\s*)?(?:1\.\s*)?(?:Discharge\s+)?Diagnosis(?:es)?(?:\*\*)?:?",
+            re.I,
+        ),
+        "Hospital Course": re.compile(
+            r"(?:\*\*)?(?:Part\s*2:\s*)?(?:#{1,3}\s*)?(?:3\.|2\.)?\s*(?:Brief\s+)?Hospital\s+Course(?:\s+Summary)?(?:\*\*)?:?",
+            re.I,
+        ),
+        "Discharge Instructions": re.compile(
+            r"(?:\*\*)?(?:Part\s*3:\s*)?(?:#{1,3}\s*)?(?:5\.|3\.)?\s*(?:Discharge\s+)?(?:Medications\s+and\s+Follow-up\s+Instructions|Instructions|Follow-up\s+Instructions)(?:\*\*)?:?",
+            re.I,
+        ),
     }
     starts = []
     for name, pattern in patterns.items():
