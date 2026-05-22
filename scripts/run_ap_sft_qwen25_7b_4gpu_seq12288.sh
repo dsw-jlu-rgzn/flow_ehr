@@ -9,7 +9,7 @@ MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-7B-Instruct}"
 DATA_DIR="${DATA_DIR:-outputs/ap_direct_sft_mimic3_age50_1w_exclude_first}"
 OUT_DIR="${OUT_DIR:-outputs/ap_direct_sft_mimic3_age50_1w_qwen25_7b_qlora_seq12288}"
 
-accelerate launch --config_file configs/accelerate_4gpu_bf16.yaml scripts/train_ap_direct_sft_lora.py \
+accelerate launch --multi_gpu --num_processes 4 --mixed_precision bf16 scripts/train_ap_direct_sft_lora.py \
   --model-name-or-path "${MODEL_NAME}" \
   --train-file "${DATA_DIR}/train.jsonl" \
   --val-file "${DATA_DIR}/val.jsonl" \
